@@ -1,0 +1,506 @@
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+.app-shell {
+  position: relative;
+  height: 100%;
+  overflow: hidden;
+  background: #e9e9e6; /* --bg-workbench（ui-style-draft §3.1） */
+  font-family:
+    -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  color: #1b1b18;
+  font-size: 13px;
+}
+
+.main-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none; /* pointer 事件接管，禁用浏览器默认手势 */
+  cursor: crosshair;
+}
+
+/* 左工具轨 48px（M5-2 将按 ui-style 规格精修） */
+.tool-rail {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 24px;
+  width: 48px;
+  background: #ffffff;
+  border-right: 1px solid #e0e0dc;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  padding: 4px;
+  gap: 4px;
+}
+
+.tool-btn {
+  height: 40px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #1b1b18;
+  font-size: 11px;
+  cursor: pointer;
+  writing-mode: horizontal-tb;
+  padding: 2px;
+}
+
+.tool-btn:hover:not(:disabled) {
+  background: #f4f4f2;
+}
+
+.tool-btn.active {
+  background: #1f1f1e;
+  color: #ffffff;
+}
+
+.tool-btn:disabled {
+  color: #8f8f88;
+  cursor: not-allowed;
+}
+
+/* 裁剪情境确认条（浮层，允许阴影） */
+.crop-bar {
+  position: absolute;
+  left: 60px;
+  top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #ffffff;
+  border: 1px solid #e0e0dc;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  padding: 8px 12px;
+}
+
+.crop-warning {
+  color: #e8890c; /* --warning */
+  font-size: 12px;
+}
+
+.btn-primary,
+.btn-warning,
+.btn-ghost {
+  height: 28px;
+  border-radius: 4px;
+  padding: 0 12px;
+  font-size: 13px;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+
+.btn-primary {
+  background: #1f1f1e;
+  color: #ffffff;
+}
+
+/* disabled = --bg-subtle 底 + --text-faint 字 + tooltip 原因（ui-style §4 主按钮/铁律 5） */
+.btn-primary:disabled,
+.btn-ghost:disabled,
+.btn-warning:disabled {
+  background: #f4f4f2;
+  color: #8f8f88;
+  border-color: #e0e0dc;
+  cursor: not-allowed;
+}
+
+/* 键盘焦点环：ink 2px，offset 1px（ui-style §3.1 --focus-ring） */
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid #1f1f1e;
+  outline-offset: 1px;
+}
+
+.btn-warning {
+  background: #e8890c;
+  color: #ffffff;
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: #e0e0dc;
+  color: #1b1b18;
+}
+
+/* 状态栏 24px（铁律 4 落点） */
+.status-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 24px;
+  background: #ffffff;
+  border-top: 1px solid #e0e0dc;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  font-size: 12px;
+  color: #5c5c56;
+}
+
+.empty-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  color: #8f8f88; /* --text-faint */
+  pointer-events: none;
+}
+
+/* ---------------------------------------------------------------- 右检查器面板 248px（§6.2） */
+.inspector {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 24px;
+  width: 248px;
+  background: #ffffff;
+  border-left: 1px solid #e0e0dc;
+  padding: 10px 12px;
+  overflow-y: auto;
+  box-sizing: border-box;
+  font-size: 12px;
+}
+
+.insp-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #8f8f88;
+  margin: 10px 0 6px;
+  letter-spacing: 0.05em;
+}
+
+.insp-section-title:first-child {
+  margin-top: 0;
+}
+
+.insp-checklist {
+  border: 1px solid #e0e0dc;
+  border-radius: 6px;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.insp-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-radius: 4px;
+  padding: 1px 4px;
+  margin: 0 -4px;
+}
+
+/* 检查清单行：整行 hover 高亮，点击跳转到对应工具（ui-style §4） */
+.insp-row.clickable {
+  cursor: pointer;
+}
+
+.insp-row.clickable:hover {
+  background: #f4f4f2;
+}
+
+.badge {
+  font-size: 11px;
+  border-radius: 3px;
+  padding: 1px 6px;
+}
+
+.badge-gray {
+  background: #f0f0ed;
+  color: #8f8f88;
+}
+
+.badge-warn {
+  background: #fdf0e0;
+  color: #e8890c;
+}
+
+.badge-ok {
+  background: #e5f4e9;
+  color: #2f9e44;
+}
+
+.axis-block {
+  border: 1px solid #e0e0dc;
+  border-radius: 6px;
+  padding: 8px;
+  margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.axis-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.axis-title {
+  font-weight: 600;
+}
+
+.insp-field {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  color: #5c5c56;
+}
+
+.insp-field select {
+  flex: 1;
+  max-width: 120px;
+  height: 24px;
+  border: 1px solid #e0e0dc;
+  border-radius: 4px;
+  background: #ffffff;
+  font-size: 12px;
+}
+
+.insp-field.checkbox {
+  justify-content: flex-start;
+  gap: 6px;
+}
+
+.insp-field.checkbox.disabled {
+  color: #b8b8b2;
+}
+
+.tick-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tick-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.tick-row:hover {
+  background: #f4f4f2;
+}
+
+.tick-row.selected {
+  background: #ededeb;
+  outline: 1px solid #d8d8d4;
+}
+
+.tick-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.tick-dot.dot-hollow {
+  border: 2px solid #1f1f1e;
+  box-sizing: border-box;
+}
+
+.tick-dot.dot-solid {
+  background: #2f9e44;
+}
+
+.tick-pos {
+  color: #8f8f88;
+  min-width: 44px;
+}
+
+.tick-value {
+  flex: 1;
+  min-width: 0;
+  height: 22px;
+  border: 1px solid #e0e0dc;
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 12px;
+}
+
+.tick-value:focus {
+  outline: 1px solid #1f1f1e;
+}
+
+.tick-del {
+  border: none;
+  background: transparent;
+  color: #8f8f88;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.tick-del:hover {
+  color: #d64545;
+}
+
+.tick-hint {
+  color: #8f8f88;
+  font-size: 11px;
+}
+
+.fit-btn {
+  width: 100%;
+}
+
+.mapping-info {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 11px;
+  color: #5c5c56;
+  border-top: 1px dashed #e0e0dc;
+  padding-top: 6px;
+}
+
+/* 状态栏：左引导/消息，右 hover 读数（M3-5） */
+.status-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hover-readout {
+  flex: none;
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 11px;
+  color: #5c5c56;
+}
+
+/* ---------------------------------------------------------------- 序列/点列表（M5-1，ui-style §4） */
+.series-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.series-row,
+.point-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+}
+
+.series-row:hover,
+.point-row:hover {
+  background: #f4f4f2; /* --bg-subtle */
+}
+
+.series-row.active,
+.point-row.selected {
+  background: #e8e8e5; /* --ink-subtle */
+  border-left-color: #1f1f1e; /* ink 左条 */
+}
+
+.series-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.series-name,
+.point-name {
+  flex: 1;
+  min-width: 0;
+  height: 22px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 12px;
+  background: transparent;
+}
+
+.series-name:hover,
+.point-name:hover {
+  border-color: #e0e0dc;
+  background: #ffffff;
+}
+
+.series-name:focus,
+.point-name:focus {
+  outline: 1px solid #1f1f1e;
+  background: #ffffff;
+}
+
+.point-pos {
+  color: #8f8f88;
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 11px;
+}
+
+.point-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-top: 1px dashed #e0e0dc;
+  padding-top: 6px;
+}
+
+/* ---------------------------------------------------------------- PDF 图库（§5.5） */
+.pdf-thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.pdf-thumb {
+  border: 2px solid transparent;
+  border-radius: 4px;
+  padding: 2px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.pdf-thumb.selected {
+  border-color: #1f1f1e;
+}
+
+.pdf-thumb img {
+  display: block;
+  border: 1px solid #e0e0dc;
+}
+
+.pdf-preview {
+  position: relative;
+  border: 1px solid #e0e0dc;
+  cursor: crosshair;
+  touch-action: none;
+  overflow: hidden;
+}
+
+.pdf-preview img {
+  display: block;
+  user-select: none;
+  pointer-events: none;
+}
+
+.pdf-region {
+  position: absolute;
+  border: 1.5px solid #e8890c;
+  background: rgba(232, 137, 12, 0.12);
+  pointer-events: none;
+}

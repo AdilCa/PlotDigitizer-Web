@@ -1,0 +1,3 @@
+# 二进制文件禁用行尾转换（PDF/PNG 若被 CRLF 转换会损坏）
+*.png binary
+*.pdf binary
