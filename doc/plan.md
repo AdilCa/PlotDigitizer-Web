@@ -8,6 +8,11 @@
 > - 「依据」列引用 architecture.md 章节号（§）、设计铁律（铁律 N）、审计条目（F x.y），开发/评审时对照检查。
 > - 工时单位：人日；总计 **25.5 人日**，与 architecture.md §8 对齐（多序列 1.0d 计入 §8「数据提取」预算，按 §9 安排在 M5 执行）。
 > - 全程无撤销（v1.3 决策）：所有任务不得引入撤销栈；误操作兜底 = 显式选中/删除/移动（铁律 3）。
+>
+> **新 agent 交接（环境坑，Windows）**
+> - npm 不在 PATH：每个 shell 先 `export PATH="/c/Users/cao/AppData/Local/Programs/kimi-desktop/resources/resources/runtime:$PATH"`，并用 `npm.cmd` 而不是 `npm`。
+> - 命令：`npm.cmd run typecheck`（tsc）→ `npm.cmd test`（vitest 119）→ `npm.cmd run build && npm.cmd run test:e2e`（Playwright 12，preview @4173，需先 build）。
+> - 接手第一步：读本文件 + `decisions.md` + `architecture.md`，然后跑上面三条确认基线全绿。
 
 ---
 
