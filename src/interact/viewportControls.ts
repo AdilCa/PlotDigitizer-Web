@@ -28,12 +28,10 @@ export interface ToolDragHandlers {
   onToolDragStart?(screenPos: PixelPoint, e: PointerEvent): void
   onToolDragMove?(screenPos: PixelPoint, e: PointerEvent): void
   onToolDragEnd?(screenPos: PixelPoint, e: PointerEvent): void
-  /** 无拖动时的指针移动（hover 读数、抓起跟随） */
+  /** 无拖动时的指针移动（hover 读数） */
   onHover?(screenPos: PixelPoint, e: PointerEvent): void
   /** 指针离开画布 */
   onHoverEnd?(): void
-  /** 原生双击（pointerdown 的 detail 恒为 0，双击必须用 dblclick 事件检测） */
-  onToolDoubleClick?(screenPos: PixelPoint, e: MouseEvent): void
 }
 
 /**
@@ -112,10 +110,6 @@ export function useViewportControls(
       handlersRef.current.onHoverEnd?.()
     }
 
-    const onDblClick = (e: MouseEvent) => {
-      handlersRef.current.onToolDoubleClick?.(localPos(e), e)
-    }
-
     const onPointerEnd = (e: PointerEvent) => {
       const d = drag.current
       if (!d || e.pointerId !== d.pointerId) return
@@ -127,7 +121,6 @@ export function useViewportControls(
     el.addEventListener('pointerdown', onPointerDown)
     el.addEventListener('pointermove', onPointerMove)
     el.addEventListener('pointerleave', onPointerLeave)
-    el.addEventListener('dblclick', onDblClick)
     el.addEventListener('pointerup', onPointerEnd)
     el.addEventListener('pointercancel', onPointerEnd)
     window.addEventListener('keydown', onKeyDown)
@@ -138,7 +131,6 @@ export function useViewportControls(
       el.removeEventListener('pointerdown', onPointerDown)
       el.removeEventListener('pointermove', onPointerMove)
       el.removeEventListener('pointerleave', onPointerLeave)
-      el.removeEventListener('dblclick', onDblClick)
       el.removeEventListener('pointerup', onPointerEnd)
       el.removeEventListener('pointercancel', onPointerEnd)
       window.removeEventListener('keydown', onKeyDown)

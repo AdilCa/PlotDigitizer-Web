@@ -1,8 +1,8 @@
 // workerClient.ts — 主线程侧 Worker 客户端（懒加载单例，id 配对请求/响应）
 import type { AxisFitDiagnostics } from '../engine/axisFitter'
 import type { TickFitDiagnostics } from '../engine/tickFitter'
-import type { AxisId, BarScanDirection, PixelPoint } from '../state/model'
-import type { CropRect, RefineItem, WorkerRequest, WorkerResponse } from './protocol'
+import type { AxisId, PixelPoint } from '../state/model'
+import type { AnnotatedMarker, CropRect, RefinedItem, RefineItem, WorkerRequest, WorkerResponse } from './protocol'
 
 /** 算法失败时 reject 的错误类型：携带 engine 诊断（扫描带/候选线），供调试叠加层可视化 */
 export class WorkerRequestError extends Error {
@@ -63,17 +63,22 @@ export async function workerLoadImage(file: Blob): Promise<{ width: number; heig
   return { width: resp.width, height: resp.height }
 }
 
-/** 裁剪：Worker 重建双轨并回传显示轨缩略图（§5.3） */
-export async function workerCrop(rect: CropRect): Promise<{
+/** 裁剪：Worker 重建双轨并回传显示轨缩略图与累计区域（§5.3） */
+export async function workerCrop(
+  rect: CropRect,
+  base: { width: number; height: number },
+): Promise<{
   width: number
   height: number
   thumbnail: ImageBitmap
+  region: CropRect
 }> {
   const resp = await request<Extract<WorkerResponse, { reqType: 'crop'; ok: true }>>({
     type: 'crop',
     rect,
+    base,
   })
-  return { width: resp.width, height: resp.height, thumbnail: resp.thumbnail }
+  return { width: resp.width, height: resp.height, thumbnail: resp.thumbnail, region: resp.region }
 }
 
 export async function workerDispose(): Promise<void> {
@@ -90,7 +95,7 @@ export async function workerExportImagePng(): Promise<Uint8Array> {
 
 /** 标注截图（§7.2）：Worker 离屏按处理轨分辨率重绘底图 + 标记叠加，与屏幕缩放无关 */
 export async function workerRenderAnnotated(
-  markers: { x: number; y: number; color: string }[],
+  markers: AnnotatedMarker[],
 ): Promise<Uint8Array> {
   const resp = await request<Extract<WorkerResponse, { reqType: 'renderAnnotated'; ok: true }>>({
     type: 'renderAnnotated',
@@ -116,35 +121,23 @@ export async function workerFitAxis(
   return { position: resp.position, diagnostics: resp.diagnostics as AxisFitDiagnostics }
 }
 
-/** 刻度拟合（§4.3）：点击位置 → 剖面谷值中心；全部成功才 resolve，失败 reject（带 diagnostics） */
+/** 刻度拟合（§4.3）：点击位置 → 多行谷值中心；全部成功才 resolve，失败 reject（带 diagnostics） */
 export async function workerFitTicks(
   axis: AxisId,
   ticks: { id: string; at: PixelPoint }[],
-  scanRadius?: number,
+  scanHalf?: number,
 ): Promise<{ fitted: Record<string, number>; diagnostics: TickFitDiagnostics }> {
   const resp = await request<Extract<WorkerResponse, { reqType: 'fitTicks'; ok: true }>>({
     type: 'fitTicks',
     axis,
     ticks,
-    scanRadius,
+    scanHalf,
   })
   return { fitted: resp.fitted, diagnostics: resp.diagnostics as TickFitDiagnostics }
 }
 
-/** 单个点 refine（§4.4 Confirm 路径）：manual 由调用方短路，不走到这里 */
-export async function workerRefinePoint(
-  pt: PixelPoint,
-  mode: 'scatter' | 'bar',
-  barDirection?: BarScanDirection,
-): Promise<PixelPoint> {
-  const [r] = await workerRefinePoints([{ refId: 'p', x: pt.x, y: pt.y, mode, barDirection }])
-  return { x: r.x, y: r.y }
-}
-
-/** 批量 refine（§5.2：无状态接口，输入点数组返回优化后点数组，等长同序） */
-export async function workerRefinePoints(
-  items: RefineItem[],
-): Promise<{ refId: string; x: number; y: number }[]> {
+/** 批量 refine（Confirm 路径，manual 由调用方短路）（§5.2：无状态接口，输入点数组返回优化后点数组，等长同序） */
+export async function workerRefinePoints(items: RefineItem[]): Promise<RefinedItem[]> {
   const resp = await request<Extract<WorkerResponse, { reqType: 'refinePoints'; ok: true }>>({
     type: 'refinePoints',
     items,

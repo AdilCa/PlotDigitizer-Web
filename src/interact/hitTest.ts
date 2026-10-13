@@ -1,8 +1,9 @@
 // hitTest.ts — 画布图元命中测试（图像坐标，容差由屏幕恒定像素换算）
 import type { AxisCalibration, AxisId, PixelPoint, ProjectModel, SeriesPoint, Tick } from '../state/model'
+import { tickAnchor } from '../state/selectors'
 
 /**
- * 命中刻度：刻度中心 = { X 轴: (t.pos, axisLine), Y 轴: (axisLine, t.pos) }（§4.3），
+ * 命中刻度：按画布上的显示位置（tickAnchor：未拟合 = 点击处，已拟合 = 轴线上的投影，§4.3），
  * 欧氏距离 ≤ tol 视为命中；返回最近的一个。
  */
 export function hitTick(
@@ -15,9 +16,8 @@ export function hitTick(
   let best: Tick | null = null
   let bestD = tolImage
   for (const t of cal.ticks) {
-    const cx = axis === 'x' ? t.pos : cal.axisLine
-    const cy = axis === 'x' ? cal.axisLine : t.pos
-    const d = Math.hypot(p.x - cx, p.y - cy)
+    const c = tickAnchor(cal, axis, t)
+    const d = Math.hypot(p.x - c.x, p.y - c.y)
     if (d <= bestD) {
       bestD = d
       best = t
@@ -26,8 +26,14 @@ export function hitTick(
   return best
 }
 
+/** 命中轴线：X 轴线为水平线 y = axisLine，Y 轴线为垂直线 x = axisLine */
+export function hitAxisLine(cal: AxisCalibration, axis: AxisId, p: PixelPoint, tolImage: number): boolean {
+  if (cal.axisLine === null || cal.skipped) return false
+  return Math.abs((axis === 'x' ? p.y : p.x) - cal.axisLine) <= tolImage
+}
+
 /**
- * 命中数据点（§6.3：单击选中 / 双击抓起）：全部序列中距 p 最近且 ≤ tol 的点。
+ * 命中数据点（§6.3：按下选中、拖动移动）：全部序列中距 p 最近且 ≤ tol 的点。
  * 返回所属序列 id 与点本身。
  */
 export function hitPoint(

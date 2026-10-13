@@ -11,6 +11,7 @@ import {
   resetModelKeepingImage,
   setCropArmed,
   setCropBox,
+  setCropBusy,
   setStatus,
 } from '../state/commands'
 import { screenLengthToImage } from '../render/viewport'
@@ -108,6 +109,18 @@ export function applyHandleDrag(
   return clampBoxToImage({ x, y, w, h }, img)
 }
 
+/**
+ * 选框 → 发给 Worker 的整数像素矩形：外扩到完整像素（floor 起点、ceil 终点）后钳制在图像内，
+ * 保证 x+w ≤ width、y+h ≤ height（不会因分别取整多出 1px 透明边）。
+ */
+export function cropPixelRect(box: CropBox, img: ImageBounds): CropBox {
+  const x0 = Math.max(0, Math.floor(box.x))
+  const y0 = Math.max(0, Math.floor(box.y))
+  const x1 = Math.min(img.width, Math.ceil(box.x + box.w))
+  const y1 = Math.min(img.height, Math.ceil(box.y + box.h))
+  return { x: x0, y: y0, w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0) }
+}
+
 /** 整体移动：选框保持在图像范围内 */
 export function moveBox(orig: CropBox, dx: number, dy: number, img: ImageBounds): CropBox {
   return {
@@ -127,7 +140,7 @@ let dragCtx:
 export function dragStart(img: PixelPoint): void {
   const s = useStore.getState()
   const image = s.model.image
-  if (!image) return
+  if (!image || s.ui.cropBusy) return
   const box = s.ui.cropBox
   if (box) {
     const tol = screenLengthToImage(s.ui.viewport, 8) // 屏幕恒定 8px 命中半径
@@ -175,25 +188,32 @@ export function dragEnd(): void {
 export async function executeCrop(): Promise<void> {
   const s = useStore.getState()
   const box = s.ui.cropBox
-  if (!box || s.ui.activeTool !== 'imageEdit') return
+  const image = s.model.image
+  if (!box || !image || s.ui.cropBusy || s.ui.activeTool !== 'imageEdit') return
   if (hasWork(s.model) && !s.ui.cropArmed) {
     setCropArmed(true)
     setStatus('⚠ 裁剪将清除当前校准与已取点（像素坐标系变更），再次确认以执行')
     return
   }
+  const rect = cropPixelRect(box, image)
+  if (rect.w < MIN_CROP_SIZE || rect.h < MIN_CROP_SIZE) return
+  setCropBusy(true)
   setStatus('正在裁剪…')
   try {
-    const r = await workerCrop({ x: Math.round(box.x), y: Math.round(box.y), w: Math.round(box.w), h: Math.round(box.h) })
-    rebindDisplayAfterCrop(box, r)
+    const r = await workerCrop(rect, { width: image.width, height: image.height })
+    rebindDisplayAfterCrop(r)
     resetModelKeepingImage({ width: r.width, height: r.height }) // 与换图同一路径全量重置（§6.6）
     clearCrop()
     setStatus('裁剪完成，已开启新数据提取任务')
   } catch (err) {
     setStatus(`裁剪失败：${err instanceof Error ? err.message : String(err)}`) // 内联反馈，铁律 5
+  } finally {
+    setCropBusy(false)
   }
 }
 
 export function cancelCrop(): void {
+  if (useStore.getState().ui.cropBusy) return
   clearCrop()
   setStatus(null)
 }
@@ -203,7 +223,7 @@ export function handleCropKey(e: KeyboardEvent): boolean {
   const s = useStore.getState()
   if (s.ui.activeTool !== 'imageEdit' || !s.ui.cropBox) return false
   if (e.key === 'Enter') {
-    void executeCrop()
+    if (!e.repeat) void executeCrop()
     return true
   }
   if (e.key === 'Escape') {

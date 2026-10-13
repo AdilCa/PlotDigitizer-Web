@@ -4,42 +4,67 @@
 // 失败：诊断叠加（扫描带 + 采样点）+ 状态栏内联错误（铁律 5），轴线保持不变。
 // 替换预告（铁律 3）：该轴已有轴线时，拖动全程轴线以 warning 色高亮 + 状态栏预告，
 // 松开即执行，不做二次确认（预告方案，区别于裁剪的二次确认）。
+// 短按（未拖动）现有轴线 = 选中该轴线（Delete 删除，连带清除刻度）；短按别处 = 取消选中。
 import type { AxisId, PixelPoint } from '../state/model'
 import { useStore } from '../state/store'
-import { setAxisLine, setDebugOverlay, setDraftLine, setStatus } from '../state/commands'
+import { selectAxis, setAxisLine, setDebugOverlay, setDraftLine, setStatus } from '../state/commands'
+import { screenLengthToImage } from '../render/viewport'
 import { workerFitAxis, WorkerRequestError } from '../worker/workerClient'
 import type { AxisFitDiagnostics } from '../engine/axisFitter'
+import { hitAxisLine } from './hitTest'
+import { POINT_DRAG_THRESHOLD } from './markerTool'
 
 /** 手绘线段最小长度（图像像素），更短视为误触直接取消 */
 export const MIN_AXIS_DRAG = 20
 
-let dragStart_: PixelPoint | null = null
+let press: { a: PixelPoint; clickTol: number; hitTol: number; warned: boolean } | null = null
 
-export function dragStart(axis: AxisId, img: PixelPoint): void {
-  dragStart_ = img
-  const cal = useStore.getState().model.calibration[axis]
-  const label = axis === 'x' ? 'X' : 'Y'
-  if (cal.axisLine !== null) {
-    setStatus(`松开将替换现有 ${label} 轴线及其刻度（已取点保留并自动重算）`) // 铁律 3 预告
+export function dragStart(_axis: AxisId, img: PixelPoint): void {
+  const vp = useStore.getState().ui.viewport
+  press = {
+    a: img,
+    clickTol: screenLengthToImage(vp, POINT_DRAG_THRESHOLD),
+    hitTol: screenLengthToImage(vp, 8),
+    warned: false,
   }
   setDraftLine({ a: img, b: img })
 }
 
-export function dragMove(img: PixelPoint): void {
-  if (!dragStart_) return
-  setDraftLine({ a: dragStart_, b: img })
+export function dragMove(axis: AxisId, img: PixelPoint): void {
+  if (!press) return
+  setDraftLine({ a: press.a, b: img })
+  if (!press.warned && Math.hypot(img.x - press.a.x, img.y - press.a.y) >= press.clickTol) {
+    press.warned = true
+    if (useStore.getState().model.calibration[axis].axisLine !== null) {
+      const label = axis === 'x' ? 'X' : 'Y'
+      setStatus(`松开将替换现有 ${label} 轴线及其刻度（已取点保留并自动重算）`) // 铁律 3 预告
+    }
+  }
 }
 
 export async function dragEnd(axis: AxisId, img: PixelPoint): Promise<void> {
-  const a = dragStart_
-  dragStart_ = null
+  const p = press
+  press = null
   setDraftLine(null)
-  if (!a) return
+  if (!p) return
+  const a = p.a
   const label = axis === 'x' ? 'X' : 'Y'
-  if (Math.hypot(img.x - a.x, img.y - a.y) < MIN_AXIS_DRAG) {
+  const dist = Math.hypot(img.x - a.x, img.y - a.y)
+  if (dist < p.clickTol) {
+    if (hitAxisLine(useStore.getState().model.calibration[axis], axis, img, p.hitTol)) {
+      selectAxis(axis)
+      setStatus(`已选中 ${label} 轴线：按 Delete 删除（连带清除该轴刻度与刻度值，已取点保留）`)
+    } else {
+      selectAxis(null)
+      setStatus(null)
+    }
+    return
+  }
+  if (dist < MIN_AXIS_DRAG) {
     setStatus(null) // 误触：取消，无副作用
     return
   }
+  selectAxis(null)
   setStatus(`正在拟合 ${label} 轴线…`)
   try {
     const r = await workerFitAxis(axis, a, img)

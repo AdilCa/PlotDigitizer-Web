@@ -1,13 +1,16 @@
 // imageWorker.ts — Worker 入口（§5.2 渲染管线 / §3 决策 4）
 // 持有的可变状态仅限处理轨像素与源句柄：
-//   gray（常驻，1B/px）、bitmap（原图 RGBA；长边 >4096 灰度化后即释放，§5.4）、
+//   gray（常驻，1B/px）、background（全图背景色，散点 refine 用）、
+//   bitmap（原图 RGBA；长边 >4096 灰度化后即释放，§5.4；散点 refine 按点读局部块）、
 //   sourceFile（File 句柄，供释放分支重解码）、
 //   region（当前图像在原图坐标系中的位置与尺寸，多次裁剪累计；不受降采样影响）。
 // 业务 model 只在主线程；本 Worker 不存任何校准/取点数据。
 import { toGray } from '../engine/gray'
 import { fitAxis } from '../engine/axisFitter'
 import { fitTicks } from '../engine/tickFitter'
-import { refineBar, refineScatter } from '../engine/refine'
+import { refineBar, type RefineResult } from '../engine/refine'
+import { estimateBackground, refineScatter, scatterPatchRect, type Rgb } from '../engine/markerBlob'
+import { labelFontSize, placeLabel } from '../render/annotatedLabel'
 import {
   PROCESS_TRACK_RELEASE_EDGE,
   shouldReleaseOriginal,
@@ -27,6 +30,7 @@ interface Region {
 let sourceFile: Blob | null = null
 let bitmap: ImageBitmap | null = null
 let gray: Uint8Array | null = null
+let background: Rgb = { r: 255, g: 255, b: 255 }
 /** 当前（处理轨）图像尺寸 = 算法/model 像素坐标系 */
 let width = 0
 let height = 0
@@ -41,12 +45,43 @@ function disposeImage(): void {
   region = { x: 0, y: 0, w: 0, h: 0 }
 }
 
+/** 透明底 PNG 先铺白：getImageData 读回的透明像素是 (0,0,0,0)，不铺白会被当成纯黑，refine 全部失效 */
+function drawOnWhite(ctx: OffscreenCanvasRenderingContext2D, src: ImageBitmap): void {
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, src.width, src.height)
+  ctx.drawImage(src, 0, 0)
+}
+
 function rasterizeToGray(bmp: ImageBitmap): Uint8Array {
   const oc = new OffscreenCanvas(bmp.width, bmp.height)
   const ctx = oc.getContext('2d')!
-  ctx.drawImage(bmp, 0, 0)
+  drawOnWhite(ctx, bmp)
   const data = ctx.getImageData(0, 0, bmp.width, bmp.height).data
+  background = estimateBackground(data, bmp.width, bmp.height)
   return toGray(data, bmp.width, bmp.height)
+}
+
+/** 散点 refine：每个点按 scatterPatchRect 读一块铺白后的 RGBA；一批只取一次原图（已释放分支重解码一次） */
+async function refineScatterBatch(items: { x: number; y: number; r: number }[]): Promise<RefineResult[]> {
+  const src = bitmap ?? (await decodeRegionFromSource())
+  const srcIsTemp = bitmap === null
+  const oc = new OffscreenCanvas(1, 1)
+  const ctx = oc.getContext('2d', { willReadFrequently: true })!
+  const out = items.map((it) => {
+    const rect = scatterPatchRect(it, it.r, width, height)
+    let data = new Uint8ClampedArray(0)
+    if (rect.w > 0 && rect.h > 0) {
+      oc.width = rect.w
+      oc.height = rect.h
+      ctx.fillStyle = '#ffffff'
+      ctx.fillRect(0, 0, rect.w, rect.h)
+      ctx.drawImage(src, rect.x, rect.y, rect.w, rect.h, 0, 0, rect.w, rect.h)
+      data = ctx.getImageData(0, 0, rect.w, rect.h).data
+    }
+    return refineScatter(it, { data, ...rect }, background, it.r)
+  })
+  if (srcIsTemp) src.close()
+  return out
 }
 
 /** 获取当前处理轨原图；已释放（>4096）时从 File 句柄按累计区域重解码（§5.4），用完由调用方释放 */
@@ -80,8 +115,15 @@ async function handleLoadImage(file: Blob): Promise<{ width: number; height: num
 
 async function handleCrop(
   rect: CropRect,
-): Promise<{ width: number; height: number; thumbnail: ImageBitmap }> {
+  base: { width: number; height: number },
+): Promise<{ width: number; height: number; thumbnail: ImageBitmap; region: CropRect }> {
   // rect 为当前图像坐标系（= model 像素坐标系）
+  if (base.width !== width || base.height !== height) {
+    throw new Error('图像已变化，本次裁剪已作废，请重新框选')
+  }
+  if (rect.x < 0 || rect.y < 0 || rect.w < 1 || rect.h < 1 || rect.x + rect.w > width || rect.y + rect.h > height) {
+    throw new Error(`裁剪矩形越界：${rect.x},${rect.y} ${rect.w}×${rect.h}（图像 ${width}×${height}）`)
+  }
   const src = bitmap ?? (await decodeRegionFromSource())
   const srcIsTemp = bitmap === null
 
@@ -127,10 +169,11 @@ async function handleCrop(
   } else {
     bitmap = next
   }
-  return { width, height, thumbnail }
+  return { width, height, thumbnail, region: { ...region } }
 }
 
-self.onmessage = async (e: MessageEvent<WorkerRequest>) => {  const req = e.data
+self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
+  const req = e.data
   try {
     switch (req.type) {
       case 'loadImage': {
@@ -140,7 +183,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {  const req = e.data
         break
       }
       case 'crop': {
-        const r = await handleCrop(req.rect)
+        const r = await handleCrop(req.rect, req.base)
         const resp: WorkerResponse = { id: req.id, reqType: 'crop', ok: true, ...r }
         self.postMessage(resp, { transfer: [r.thumbnail] })
         break
@@ -156,7 +199,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {  const req = e.data
         const src = bitmap ?? (await decodeRegionFromSource())
         const srcIsTemp = bitmap === null
         const oc = new OffscreenCanvas(src.width, src.height)
-        oc.getContext('2d')!.drawImage(src, 0, 0)
+        drawOnWhite(oc.getContext('2d')!, src)
         if (srcIsTemp) src.close()
         const blob = await oc.convertToBlob({ type: 'image/png' })
         const png = await blob.arrayBuffer()
@@ -170,7 +213,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {  const req = e.data
         const srcIsTemp = bitmap === null
         const oc = new OffscreenCanvas(src.width, src.height)
         const ctx = oc.getContext('2d')!
-        ctx.drawImage(src, 0, 0)
+        drawOnWhite(ctx, src)
         if (srcIsTemp) src.close()
         // 标记半径随分辨率缩放（≈ 屏幕 4px @ 100% 显示比例的观感）
         const r = Math.max(4, Math.round(Math.max(src.width, src.height) / 400))
@@ -183,6 +226,22 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {  const req = e.data
           ctx.strokeStyle = '#FFFFFF'
           ctx.stroke()
         }
+        // 点名：序列色文字 + 白色描边，任意底色上可读；标记全部画完再画文字，避免被相邻标记压住
+        const fontSize = labelFontSize(r)
+        ctx.font = `600 ${fontSize}px system-ui, "Microsoft YaHei", sans-serif`
+        ctx.textAlign = 'left'
+        ctx.textBaseline = 'alphabetic'
+        ctx.lineJoin = 'round'
+        ctx.lineWidth = Math.max(2, fontSize / 4)
+        ctx.strokeStyle = '#FFFFFF'
+        for (const m of req.markers) {
+          if (!m.name) continue
+          const size = { width: ctx.measureText(m.name).width, height: fontSize * 0.8 }
+          const at = placeLabel(m, r, size, { width: src.width, height: src.height })
+          ctx.strokeText(m.name, at.x, at.y)
+          ctx.fillStyle = m.color
+          ctx.fillText(m.name, at.x, at.y)
+        }
         const blob = await oc.convertToBlob({ type: 'image/png' })
         const png = await blob.arrayBuffer()
         const resp: WorkerResponse = { id: req.id, reqType: 'renderAnnotated', ok: true, png }
@@ -191,13 +250,17 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {  const req = e.data
       }
       case 'refinePoints': {
         if (!gray) throw new Error('Worker 无灰度数据，请先加载图像')
+        const scatter = req.items.filter((it) => it.mode === 'scatter')
+        const scattered = scatter.length
+          ? await refineScatterBatch(scatter.map((it) => ({ x: it.x, y: it.y, r: it.scatterRadius ?? 8 })))
+          : []
+        let si = 0
         const refined = req.items.map((it) => {
-          const pt = { x: it.x, y: it.y }
           const out =
             it.mode === 'scatter'
-              ? refineScatter(pt, gray!, width, height)
-              : refineBar(pt, gray!, width, height, it.barDirection ?? 'down')
-          return { refId: it.refId, x: out.x, y: out.y }
+              ? scattered[si++]
+              : refineBar({ x: it.x, y: it.y }, gray!, width, height, it.barDirection ?? 'down', it.barSpan)
+          return { refId: it.refId, ...out }
         })
         const resp: WorkerResponse = { id: req.id, reqType: 'refinePoints', ok: true, refined }
         self.postMessage(resp)
@@ -229,7 +292,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {  const req = e.data
       }
       case 'fitTicks': {
         if (!gray) throw new Error('Worker 无灰度数据，请先加载图像')
-        const r = fitTicks(gray, width, height, req.axis, req.ticks, req.scanRadius)
+        const r = fitTicks(gray, width, height, req.axis, req.ticks, req.scanHalf)
         if (r.ok) {
           const resp: WorkerResponse = {
             id: req.id,

@@ -1,55 +1,57 @@
 // refine.ts — 点优化（§4.4）
-// scatter → 暗度质心（r=8，gray 由调用方传入，绝不在此转换图像——修复 C++ 性能 bug）；
-// bar → 沿序列级设置方向（上/下/左/右，默认向下）由外向内扫，取从起点出发首个
-//        超过阈值的强跳变（|Δgray| 最大处）= 柱顶/柱端边缘；垂直方向 ±5px 多剖面投票（中位数）；
+// scatter → 颜色分割 + 连通块重心，见 markerBlob.ts；本文件只提供其搜索框（refineWindow）；
+// bar → 从初始点沿序列级方向（上/下/左/右，默认向下）扫描 span 像素：
+//        垂直于扫描方向 ±5px 取平均剖面（抗网纹/噪声），找首个 |Δ| ≥ 阈值的跳变区段，
+//        区段内 |Δ| 最大处 = 柱顶/柱端边缘；
 // manual → 不调用本模块任何函数，按标记原位置提交（§6.3）。
-// 纯函数，零 DOM 依赖；Worker 批量接口按点数组调用（§5.2）。
+// 纯函数，零 DOM 依赖；Worker 批量接口按点数组调用（§5.2）。坐标约定见 gray.ts。
 import type { BarScanDirection, PixelPoint } from '../state/model'
+import { grayAtIndex } from './gray'
 
 export const REFINE_DEFAULTS = {
   scatterRadius: 8,
   barSpan: 40,
-  /** 强跳变阈值 |Δgray|（相邻像素灰度差） */
-  barThreshold: 40,
-  /** 投票剖面的垂直偏移（px，含 0） */
-  barProfileOffsets: [-5, -2, 0, 2, 5],
+  /** 平均剖面上的跳变阈值 |Δgray| */
+  barThreshold: 10,
+  /** 平均剖面的垂直半宽（px） */
+  barHalfWidth: 5,
 } as const
 
-function grayAt(gray: Uint8Array, width: number, height: number, x: number, y: number): number {
-  const px = Math.round(x)
-  const py = Math.round(y)
-  if (px < 0 || px >= width || py < 0 || py >= height) return 255
-  return gray[py * width + px]
+/**
+ * refine 的作用范围（连续坐标矩形），供画布可视化：
+ * scatter = 以点击像素为中心的 (2r+1)² 搜索框（标记碰到即可，可以比框大）；
+ * bar = 沿扫描方向 span、垂直 ±barHalfWidth 的条带（与 refineBar 采样一一对应）。
+ */
+export function refineWindow(
+  pt: PixelPoint,
+  params: { mode: 'scatter'; radius: number } | { mode: 'bar'; direction: BarScanDirection; span: number },
+): { x: number; y: number; w: number; h: number } {
+  const ix0 = Math.floor(pt.x)
+  const iy0 = Math.floor(pt.y)
+  if (params.mode === 'scatter') {
+    const r = Math.round(params.radius)
+    return { x: ix0 - r, y: iy0 - r, w: 2 * r + 1, h: 2 * r + 1 }
+  }
+  const v = DIR_VEC[params.direction]
+  const u = { x: -v.y, y: v.x }
+  const n = Math.max(1, Math.round(params.span))
+  const hw = REFINE_DEFAULTS.barHalfWidth
+  const xs = [0, n].flatMap((k) => [-hw, hw].map((o) => ix0 + v.x * k + u.x * o))
+  const ys = [0, n].flatMap((k) => [-hw, hw].map((o) => iy0 + v.y * k + u.y * o))
+  const x = Math.min(...xs)
+  const y = Math.min(...ys)
+  return { x, y, w: Math.max(...xs) - x + 1, h: Math.max(...ys) - y + 1 }
 }
 
-/**
- * scatter：以"暗度"= 255−gray 为权重求 (2r+1)² 窗口质心。
- * 窗口内全白（无特征）时原样返回——refine 永远不制造凭空位移。
- */
-export function refineScatter(
-  pt: PixelPoint,
-  gray: Uint8Array,
-  width: number,
-  height: number,
-  r: number = REFINE_DEFAULTS.scatterRadius,
-): PixelPoint {
-  let sumW = 0
-  let sumX = 0
-  let sumY = 0
-  for (let dy = -r; dy <= r; dy++) {
-    for (let dx = -r; dx <= r; dx++) {
-      const x = pt.x + dx
-      const y = pt.y + dy
-      const wgt = 255 - grayAt(gray, width, height, x, y)
-      if (wgt > 0) {
-        sumW += wgt
-        sumX += wgt * x
-        sumY += wgt * y
-      }
-    }
-  }
-  if (sumW === 0) return { ...pt }
-  return { x: sumX / sumW, y: sumY / sumW }
+/** snapped = false：未找到特征，按原位置返回 */
+export interface RefineResult {
+  x: number
+  y: number
+  snapped: boolean
+  /** 未吸附原因（scatter） */
+  reason?: string
+  /** 吸附所用像素的凸包（图像坐标，scatter） */
+  outline?: PixelPoint[]
 }
 
 const DIR_VEC: Record<BarScanDirection, PixelPoint> = {
@@ -59,34 +61,9 @@ const DIR_VEC: Record<BarScanDirection, PixelPoint> = {
   left: { x: -1, y: 0 },
 }
 
-/** 单剖面：从起点沿 dir 扫描，返回首个 |Δgray| ≥ threshold 的跳变位置（沿轴距离），无则 null */
-function scanProfile(
-  pt: PixelPoint,
-  perpOffset: number,
-  dir: BarScanDirection,
-  gray: Uint8Array,
-  width: number,
-  height: number,
-  span: number,
-  threshold: number,
-): number | null {
-  const v = DIR_VEC[dir]
-  // 垂直于扫描方向的单位向量
-  const u = { x: -v.y, y: v.x }
-  const ox = pt.x + u.x * perpOffset
-  const oy = pt.y + u.y * perpOffset
-  let prev = grayAt(gray, width, height, ox, oy)
-  for (let k = 1; k <= span; k++) {
-    const cur = grayAt(gray, width, height, ox + v.x * k, oy + v.y * k)
-    if (Math.abs(cur - prev) >= threshold) return k - 0.5 // 跳变沿中点
-    prev = cur
-  }
-  return null
-}
-
 /**
- * bar：由外向内（dir）首个强跳变 = 柱边缘；±5px 多剖面投票取中位数（防斜边误判）。
- * 所有剖面都无跳变 → 原样返回。
+ * bar：沿 dir 扫描 span 像素，首个跳变区段内梯度最大处 = 柱边缘（两个像素之间的边界）。
+ * 无跳变 → 原样返回（snapped = false）。只移动扫描方向上的坐标。
  */
 export function refineBar(
   pt: PixelPoint,
@@ -95,16 +72,43 @@ export function refineBar(
   height: number,
   dir: BarScanDirection = 'down',
   span: number = REFINE_DEFAULTS.barSpan,
-): PixelPoint {
+): RefineResult {
   const D = REFINE_DEFAULTS
-  const votes: number[] = []
-  for (const off of D.barProfileOffsets) {
-    const k = scanProfile(pt, off, dir, gray, width, height, span, D.barThreshold)
-    if (k !== null) votes.push(k)
-  }
-  if (votes.length === 0) return { ...pt }
-  votes.sort((a, b) => a - b)
-  const median = votes[votes.length >> 1]
   const v = DIR_VEC[dir]
-  return { x: pt.x + v.x * median, y: pt.y + v.y * median }
+  const u = { x: -v.y, y: v.x }
+  const ix0 = Math.floor(pt.x)
+  const iy0 = Math.floor(pt.y)
+  const n = Math.max(1, Math.round(span))
+
+  const prof = new Array<number>(n + 1)
+  for (let k = 0; k <= n; k++) {
+    let sum = 0
+    for (let o = -D.barHalfWidth; o <= D.barHalfWidth; o++) {
+      sum += grayAtIndex(gray, width, height, ix0 + v.x * k + u.x * o, iy0 + v.y * k + u.y * o)
+    }
+    prof[k] = sum / (2 * D.barHalfWidth + 1)
+  }
+
+  let best = -1
+  let bestGrad = 0
+  for (let k = 1; k <= n; k++) {
+    const g = Math.abs(prof[k] - prof[k - 1])
+    if (g >= D.barThreshold) {
+      if (g > bestGrad) {
+        bestGrad = g
+        best = k
+      }
+    } else if (best > 0) {
+      break
+    }
+  }
+  if (best < 0) return { x: pt.x, y: pt.y, snapped: false }
+
+  // 像素 k-1 与 k 之间的边界：起点像素中心 + (k − 0.5)·v
+  const along = best - 0.5
+  return {
+    x: v.x === 0 ? pt.x : ix0 + 0.5 + v.x * along,
+    y: v.y === 0 ? pt.y : iy0 + 0.5 + v.y * along,
+    snapped: true,
+  }
 }

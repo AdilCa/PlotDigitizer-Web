@@ -22,14 +22,34 @@ export function tickFitted(t: Tick): boolean {
   return t.fittedPos !== null && t.fittedPos === t.pos
 }
 
-/** 「已校准」完整条件（§6.2）：恰好 2 刻度 + 均已拟合 + 两刻度值均已输入 */
+/** 刻度在画布上的位置：未拟合 = 用户点击处 at；已拟合 = 轴线上的投影 (pos, axisLine) */
+export function tickAnchor(cal: AxisCalibration, axis: AxisId, t: Tick): PixelPoint {
+  if (!tickFitted(t) || cal.axisLine === null) return t.at
+  return axis === 'x' ? { x: t.pos, y: cal.axisLine } : { x: cal.axisLine, y: t.pos }
+}
+
+/** 两刻度均已拟合且已输入值时的映射；退化（同位置/同值/log 非正）为 null */
+function solvedMapping(cal: AxisCalibration): MappingParams | null {
+  if (cal.skipped || cal.axisLine === null || cal.ticks.length !== 2) return null
+  const [t1, t2] = cal.ticks
+  if (!tickFitted(t1) || !tickFitted(t2) || t1.value === null || t2.value === null) return null
+  return solveMapping(t1.pos, t1.value, t2.pos, t2.value, cal.scaleType)
+}
+
+/** 「已校准」完整条件（§6.2）：恰好 2 刻度 + 均已拟合 + 两刻度值均已输入 + 映射可解 */
 export function isAxisCalibrated(cal: AxisCalibration): boolean {
-  return (
-    !cal.skipped &&
-    cal.axisLine !== null &&
-    cal.ticks.length === 2 &&
-    cal.ticks.every((t) => tickFitted(t) && t.value !== null)
-  )
+  return solvedMapping(cal) !== null
+}
+
+/** 刻度、值都齐了但映射不可解时的原因（供面板与状态栏内联提示）；否则 null */
+export function axisIssue(cal: AxisCalibration): string | null {
+  if (cal.skipped || cal.axisLine === null || cal.ticks.length !== 2) return null
+  const [t1, t2] = cal.ticks
+  if (!tickFitted(t1) || !tickFitted(t2) || t1.value === null || t2.value === null) return null
+  if (t1.pos === t2.pos) return '两个刻度拟合到了同一位置，请把其中一个移到另一根刻度上'
+  if (t1.value === t2.value) return '两个刻度值相同，无法确定比例'
+  if (cal.scaleType === 'log' && (t1.value <= 0 || t2.value <= 0)) return '对数轴刻度值必须 > 0'
+  return null
 }
 
 export function axisStatus(cal: AxisCalibration): AxisStatus {
@@ -46,16 +66,17 @@ export type AxisPhase =
   | 'needTicks' // 轴线已画，刻度不足 2 个
   | 'pendingFit' // 2 个刻度但未全部拟合（空心）
   | 'needValues' // 已拟合但刻度值未录全
+  | 'invalid' // 都齐了但映射不可解（axisIssue 给出原因）
   | 'calibrated'
 
-/** 比 axisStatus 更细的单轴引导态：lineDrawn 拆为 needTicks / pendingFit / needValues */
+/** 比 axisStatus 更细的单轴引导态：lineDrawn 拆为 needTicks / pendingFit / needValues / invalid */
 export function axisPhase(cal: AxisCalibration): AxisPhase {
   if (cal.skipped) return 'skipped'
   if (cal.axisLine === null) return 'unset'
   if (cal.ticks.length < 2) return 'needTicks'
   if (!cal.ticks.every(tickFitted)) return 'pendingFit'
   if (!cal.ticks.every((t) => t.value !== null)) return 'needValues'
-  return 'calibrated'
+  return isAxisCalibrated(cal) ? 'calibrated' : 'invalid'
 }
 
 /**
@@ -76,10 +97,13 @@ export function nextActionHint(state: AppState): string {
         return `点击「拟合 ${label} 轴刻度」`
       case 'needValues':
         return `输入两个 ${label} 刻度值`
+      case 'invalid':
+        return `${label} 轴校准无效：${axisIssue(cal)}`
       // skipped / calibrated：该轴已完成，继续检查下一轴
     }
   }
-  return anyAxisCalibrated(model) ? '开始取点' : '两轴均已跳过，无法取点（请恢复至少一个轴）'
+  if (!anyAxisCalibrated(model)) return '两轴均已跳过，无法取点（请恢复至少一个轴）'
+  return model.activeSeriesId === null ? '新建序列并选择图表类型，然后取点' : '开始取点'
 }
 
 // ---------------------------------------------------------------- 映射（§4.5）
@@ -91,14 +115,7 @@ export type AxisMapping = MappingParams
  * 求解实现收敛在 engine/geometry.ts；此处只做校准态门控。
  */
 export function axisMapping(cal: AxisCalibration): AxisMapping | null {
-  if (!isAxisCalibrated(cal)) return null
-  const [t1, t2] = cal.ticks
-  const p1 = t1.fittedPos
-  const p2 = t2.fittedPos
-  const v1 = t1.value
-  const v2 = t2.value
-  if (p1 === null || p2 === null || v1 === null || v2 === null) return null
-  return solveMapping(p1, v1, p2, v2, cal.scaleType)
+  return solvedMapping(cal)
 }
 
 export { applyMapping }
@@ -206,6 +223,8 @@ export function gateFor(state: AppState, op: GateOp): GateResult {
     case 'fitTickY':
       return gateFitTick(model.calibration.y, 'Y')
     case 'extractMarker':
+      if (!anyAxisCalibrated(model)) return no('需至少校准一个轴')
+      return model.activeSeriesId !== null ? OK : no('请先新建序列并选择图表类型')
     case 'export':
       return anyAxisCalibrated(model) ? OK : no('需至少校准一个轴')
   }
@@ -227,6 +246,16 @@ export function toolEnabled(state: AppState): Record<ToolId, GateResult> {
     out[tool] = gateFor(state, TOOL_GATE[tool])
   }
   return out
+}
+
+/**
+ * 当前工具的门控失效时（跳过轴、删除轴线/序列、换图…）应回退到的工具；无需回退返回 null。
+ * 未加载图像时所有工具都不可用，保持原样（加载后再判断）。
+ */
+export function toolFallback(state: AppState): ToolId | null {
+  const tool = state.ui.activeTool
+  if (state.model.image === null || gateFor(state, TOOL_GATE[tool]).enabled) return null
+  return tool === 'markTickY' ? 'drawYAxis' : 'drawXAxis'
 }
 
 /** 跳过轴的反向门控：不允许两轴同时跳过（§6.2，无坐标语义） */

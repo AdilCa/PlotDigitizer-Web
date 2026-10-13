@@ -2,18 +2,16 @@
 // magic bytes 分流：PK\x03\x04 → .pdproj（恢复工程），%PDF → PDF（M4-1 识别流程），
 // 图片魔数/MIME → 直接建双轨。
 // 已存在工作时触发「将清除当前校准与已取点」内联预告，确认后全量重置（§6.6、铁律 3）。
-import { loadImage, restoreProject, setPendingImportName, setStatus } from '../state/commands'
+import { loadImage, restoreProject, setPdfDialogOpen, setPendingImportName, setStatus } from '../state/commands'
 import { hasWork } from '../state/selectors'
 import { useStore } from '../state/store'
 import { workerExportImagePng, workerLoadImage } from '../worker/workerClient'
 import { setDisplaySource } from '../render/imageCache'
 import { buildProjectBlob, parseProject } from './projectFile'
-import type { CropBox } from '../state/store'
 
-/** 当前图像源与累计裁剪区域（原图坐标系；与 Worker 侧 region 同步维护，§5.3/§5.4） */
+/** 当前图像源与累计裁剪区域（原图坐标系；裁剪后以 Worker 回传值为准，§5.3/§5.4） */
 let currentFile: File | null = null
 let region = { x: 0, y: 0, w: 0, h: 0 }
-let currentDims = { width: 0, height: 0 }
 
 /** 显示轨缩放级解码：原 File + 累计裁剪区域一次性 crop+resize（主线程零像素运算） */
 function decodeLevel(w: number, h: number): Promise<ImageBitmap> {
@@ -59,7 +57,7 @@ export async function sniffKind(file: File): Promise<FileKind> {
  * 图片加载主路径（§5.2 渲染管线）：
  * Worker decode → gray（处理轨）；主线程以 File 为源建显示轨（imageCache 按需重采样，零像素运算）。
  * 换图 = 全量重置 model（§6.6，由 commands.loadImage 落实）；预告由调用方完成。
- * pdfInfo：PDF 区域导入的来源定位（§7.3 文件名规则）。
+ * pdfInfo：PDF 整页导入的来源定位（§7.3 文件名规则）。
  */
 export async function loadImageFile(
   file: File,
@@ -68,7 +66,6 @@ export async function loadImageFile(
   const { width, height } = await workerLoadImage(file)
   currentFile = file
   region = { x: 0, y: 0, w: width, h: height }
-  currentDims = { width, height }
   setDisplaySource({ width, height }, decodeLevel)
   if (pdfInfo) {
     loadImage({
@@ -86,20 +83,15 @@ export async function loadImageFile(
 
 /**
  * 裁剪确认后重绑显示轨（§5.3 步骤 3/4）：
- * 累计裁剪区域（当前坐标 → 原图坐标），Worker 回传的缩略图作为种子级，旧资源由 imageCache 显式 close()。
+ * 采用 Worker 回传的累计区域（原图坐标，唯一来源），Worker 回传的缩略图作为种子级，旧资源由 imageCache 显式 close()。
  */
-export function rebindDisplayAfterCrop(
-  crop: CropBox,
-  result: { width: number; height: number; thumbnail: ImageBitmap },
-): void {
-  const k = region.w / currentDims.width // 含历史降采样因子
-  region = {
-    x: region.x + crop.x * k,
-    y: region.y + crop.y * k,
-    w: crop.w * k,
-    h: crop.h * k,
-  }
-  currentDims = { width: result.width, height: result.height }
+export function rebindDisplayAfterCrop(result: {
+  width: number
+  height: number
+  thumbnail: ImageBitmap
+  region: { x: number; y: number; w: number; h: number }
+}): void {
+  region = { ...result.region }
   setDisplaySource({ width: result.width, height: result.height }, decodeLevel, result.thumbnail)
 }
 
@@ -114,7 +106,6 @@ export async function loadProjectFile(file: File): Promise<void> {
   const { width, height } = await workerLoadImage(imgFile)
   currentFile = imgFile
   region = { x: 0, y: 0, w: width, h: height }
-  currentDims = { width, height }
   setDisplaySource({ width, height }, decodeLevel)
   restoreProject(model)
 }
@@ -128,6 +119,11 @@ export async function buildProjectFile(): Promise<Blob> {
 
 /** 统一入口：拖放 / 文件选择器都走这里 */
 export async function importFile(file: File): Promise<void> {
+  // 裁剪请求在途时 Worker 正在重建处理轨，此时换图会让两者交错
+  if (useStore.getState().ui.cropBusy) {
+    setStatus('正在裁剪，请稍候再加载新文件')
+    return
+  }
   // §6.6 预告：已有校/取点工作时先内联预告，确认后（confirmPendingImport）才执行
   if (hasWork(useStore.getState().model)) {
     pendingImport = file
@@ -142,14 +138,12 @@ let pendingImport: File | null = null
 /** 预告条「仍要加载」（普通文件与 PDF 区域导入共用） */
 export function confirmPendingImport(): void {
   const f = pendingImport
-  const pdf = pendingPdfRegion
+  const pdf = pendingPdfPage
   pendingImport = null
-  pendingPdfRegion = null
+  pendingPdfPage = null
   setPendingImportName(null)
   if (pdf) {
-    void loadImageFile(pdf.file, pdf.pdfInfo).then(() =>
-      setStatus(`已导入 ${pdf.file.name}（300 DPI 区域渲染）`),
-    )
+    void loadImageFile(pdf.file, pdf.pdfInfo).then(() => setStatus(pdf.done))
   } else if (f) {
     void doImport(f)
   }
@@ -158,7 +152,7 @@ export function confirmPendingImport(): void {
 /** 预告条「取消」 */
 export function cancelPendingImport(): void {
   pendingImport = null
-  pendingPdfRegion = null
+  pendingPdfPage = null
   setPendingImportName(null)
   setStatus(null)
 }
@@ -172,7 +166,7 @@ async function doImport(file: File): Promise<void> {
         return
       case 'pdf': {
         const { openPdf } = await import('../pdf/pdfSession') // pdfjs 按需加载（§5.5，不拖累主包）
-        await openPdf(file) // 96 DPI 浏览轨 + 会话缓存图库；区域导入由图库面板触发
+        await openPdf(file) // 打开选页弹窗 + 会话缓存；整页导入由弹窗触发
         return
       }
       case 'pdproj':
@@ -187,36 +181,40 @@ async function doImport(file: File): Promise<void> {
 }
 
 /**
- * PDF 图库「导入区域」（§5.5）：300 DPI 区域渲染 → 走图片加载主路径（双轨）。
+ * PDF 选页弹窗「导入此页」（§5.5）：整页按 DPI 渲染 → 走图片加载主路径（双轨）。
+ * 需要的区域在画布上用图像编辑工具裁剪（裁剪唯一入口）。
  * = 加载新图：已有工作时同样先走 §6.6 预告（pendingImport 机制，File 为虚拟命名）。
  */
-export async function importPdfRegion(
-  page: number,
-  rect: { x: number; y: number; w: number; h: number },
-): Promise<void> {
-  setStatus(`正在按 300 DPI 渲染第 ${page} 页所选区域…`)
+export async function importPdfPage(page: number, dpi: number): Promise<void> {
+  setPdfDialogOpen(false)
+  setStatus(`正在按 ${dpi} DPI 渲染第 ${page} 页…`)
   try {
-    const { renderRegion, nextImageIndex, currentPdfName } = await import('../pdf/pdfSession')
-    const blob = await renderRegion(page, rect)
+    const { renderPageImage, nextImageIndex, currentPdfName } = await import('../pdf/pdfSession')
+    const blob = await renderPageImage(page, dpi)
     const idx = nextImageIndex()
     const stem = currentPdfName().replace(/\.[^.]+$/, '')
     const file = new File([blob], `${stem}-p${page}-img${idx}.png`, { type: 'image/png' })
     const pdfInfo = { fileName: currentPdfName(), page, imageIndex: idx }
+    const done = `已导入第 ${page} 页（${dpi} DPI）；只需要其中的图表时，用「图像编辑」工具在画布上裁剪`
 
     if (hasWork(useStore.getState().model)) {
       // 与拖入新图同一预告路径；确认后执行 loadImageFile(file, pdfInfo)
-      pendingPdfRegion = { file, pdfInfo }
+      pendingPdfPage = { file, pdfInfo, done }
       setPendingImportName(file.name)
       return
     }
     await loadImageFile(file, pdfInfo)
-    setStatus(`已导入 ${file.name}（300 DPI 区域渲染）`)
+    setStatus(done)
   } catch (err) {
-    setStatus(`区域渲染失败：${err instanceof Error ? err.message : String(err)}`)
+    setStatus(`页面渲染失败：${err instanceof Error ? err.message : String(err)}`)
   }
 }
 
-let pendingPdfRegion: { file: File; pdfInfo: { fileName: string; page: number; imageIndex: number } } | null = null
+let pendingPdfPage: {
+  file: File
+  pdfInfo: { fileName: string; page: number; imageIndex: number }
+  done: string
+} | null = null
 
 /** 拖放导入：图片/PDF/.pdproj 直接拖入窗口即加载（§7.3） */
 export function installDropZone(el: HTMLElement): () => void {

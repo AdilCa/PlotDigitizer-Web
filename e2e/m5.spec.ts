@@ -92,19 +92,29 @@ test('M5 冒烟：完整主流程 + .pdproj 恢复', async ({ page }) => {
   await expect(checklist).toContainText('已校准 ✓')
 
   // ---- 多序列取点（M5-1 分组工作流：组 A 柱状 → 切组 B）
-  await page.getByRole('button', { name: '取点' }).click()
+  await expect(page.getByRole('button', { name: '取点', exact: true })).toBeDisabled() // 还没有序列
   await page.getByTestId('add-series').click()
+  await page.getByTestId('new-series-bar').click()
   await page.getByTestId('series-name-0').fill('组A')
-  await page.getByTestId('chart-type').selectOption('bar')
   await expect(page.getByTestId('bar-direction')).toBeVisible()
+  await expect(page.getByTestId('bar-span')).toHaveValue('40')
+  await page.getByRole('button', { name: '取点', exact: true }).click()
+  // 批量取点：连点两个，确认一次全部提交
+  await page.getByTestId('batch-pick').click()
+  await expect(page.getByTestId('batch-pick')).toHaveAttribute('aria-pressed', 'true')
   await clickImage(page, { x: 1000, y: 1000 })
-  await page.keyboard.press('Enter')
   await clickImage(page, { x: 2000, y: 1500 })
+  await expect(page.getByTestId('confirm-marker')).toHaveText('确认 2 个点（Enter）')
   await page.keyboard.press('Enter')
   await expect(page.getByTestId('point-count')).toHaveText('已确认 2 个')
+  await expect(page.getByTestId('confirm-marker')).toBeDisabled()
+  await page.getByTestId('batch-pick').click() // 关回单点，下面沿用单点流程
 
   await page.getByTestId('add-series').click()
+  await page.getByTestId('new-series-scatter').click()
   await page.getByTestId('series-name-1').fill('组B')
+  await expect(page.getByTestId('scatter-radius')).toHaveValue('8')
+  await expect(page.getByTestId('bar-span')).toHaveCount(0)
   // 点行 = 切换当前序列（M5-1）
   await page.getByTestId('series-row-0').click()
   await expect(page.getByTestId('point-count')).toHaveText('已确认 2 个')
@@ -121,6 +131,7 @@ test('M5 冒烟：完整主流程 + .pdproj 恢复', async ({ page }) => {
 
   // 删除第三个序列：活动序列回退，不残留
   await page.getByTestId('add-series').click()
+  await page.getByTestId('new-series-scatter').click()
   await page.getByTestId('series-delete-2').click()
   await expect(page.getByTestId('series-row-2')).toHaveCount(0)
 

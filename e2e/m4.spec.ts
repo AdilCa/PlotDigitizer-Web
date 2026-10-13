@@ -52,9 +52,9 @@ async function setupProject(page: import('@playwright/test').Page) {
   await expect(page.locator('.status-bar')).toContainText('刻度已拟合', { timeout: 8000 })
   await page.getByTestId('tick-value-x-0').fill('0')
   await page.getByTestId('tick-value-x-1').fill('100')
-  await page.getByRole('button', { name: '取点' }).click()
   await page.getByTestId('add-series').click()
-  await page.getByTestId('chart-type').selectOption('manual')
+  await page.getByTestId('new-series-manual').click()
+  await page.getByRole('button', { name: '取点', exact: true }).click()
   await clickImage(page, { x: 1000, y: 1000 })
   await page.keyboard.press('Enter')
   await clickImage(page, { x: 2000, y: 1500 })
@@ -67,6 +67,7 @@ test('M4：MD + 标注 PNG 导出（跳过轴整列不出现；数据与屏幕�
   await page.getByTestId('export-toggle').click()
   await expect(page.getByTestId('export-filename')).toHaveValue('large-4000x3000-digitized')
   await page.getByTestId('export-title').fill('E2E 图表')
+  await page.locator('[data-testid^="export-prefix-"]').fill('P')
 
   const mdDownload = page.waitForEvent('download')
   await page.getByTestId('export-run').click()
@@ -81,12 +82,14 @@ test('M4：MD + 标注 PNG 导出（跳过轴整列不出现；数据与屏幕�
   console.log('[M4] MD 导出预览:\n' + content.split('\n').slice(0, 16).join('\n'))
   expect(content).toContain('# E2E 图表')
   expect(content).toContain('![标注截图](large-4000x3000-annotated.png)')
-  expect(content).toContain('X 轴：a=-21.48') // 601.5→0, 3401.5→100
+  expect(content).toContain('X 轴：a=-21.4643,') // 刻度中心 601→0, 3401→100：a = -601×100/2800
   expect(content).toContain('Y 轴：未校准')
   expect(content).toMatch(/\| 点名 \| X \|/) // 跳过/未校准轴整列不出现
-  expect(content).toMatch(/\| 序列 11 \| 14\.\d+ \|/) // p1 x=1000 → X≈14.23
+  expect(content).toMatch(/\| P1 \| 14\.\d+ \|/) // p1 x=1000 → X≈14.23；导出前改的前缀作用于已有点
+  expect(content).toMatch(/\| P2 \| /)
 
   const pngPath = await png.path()
+  await png.saveAs(test.info().outputPath('annotated.png')) // 留档供人工查看
   const pngHead = await fs.readFile(pngPath)
   expect(pngHead[0]).toBe(0x89) // PNG 魔数
   expect(pngHead.length).toBeGreaterThan(10000)
@@ -151,36 +154,71 @@ test('M4：加载重置预告（铁律 3）——已有工作时新文件需确�
   expect(xCal).toBeNull() // 无旧校准残留（F3.4）
 })
 
-test('M4：PDF 图库 → 区域 300 DPI 导入（§5.5）', async ({ page }) => {
+test('M4：PDF 选页弹窗 → 整页按 DPI 导入，会话可重新打开（§5.5）', async ({ page }) => {
   await page.goto('/')
   const chooser = page.waitForEvent('filechooser')
   await page.getByRole('button', { name: '打开' }).click()
   await (await chooser).setFiles(PDF_FIXTURE)
-  // 图库出现，两页缩略图
-  await expect(page.getByTestId('pdf-gallery')).toBeVisible({ timeout: 15000 })
+  // 打开即弹窗，两页缩略图逐页出现
+  const dialog = page.getByTestId('pdf-dialog')
+  await expect(dialog).toBeVisible({ timeout: 15000 })
   await expect(page.getByTestId('pdf-page-1')).toBeVisible()
   await expect(page.getByTestId('pdf-page-2')).toBeVisible()
+  await expect(dialog.locator('.pdf-dialog-progress')).toHaveCount(0)
 
-  // 选中第 1 页，框选中部区域
-  await page.getByTestId('pdf-page-1').click()
-  const preview = page.getByTestId('pdf-preview')
-  await expect(preview).toBeVisible()
-  const box = (await preview.boundingBox())!
-  await page.mouse.move(box.x + box.width * 0.1, box.y + box.height * 0.35)
+  const pageSize = (p: number) =>
+    page.evaluate((n) => {
+      const t = (window as any).__store.getState().ui.pdfGallery.thumbs.find((x: any) => x.page === n)
+      return { wPt: t.widthPt, hPt: t.heightPt }
+    }, p)
+  const px = (pt: number, dpi: number) => Math.ceil((pt / 72) * dpi)
+
+  // 选第 2 页：大预览 + 导入尺寸提示；↑ 回到第 1 页
+  await page.getByTestId('pdf-page-2').click()
+  await expect(page.getByRole('img', { name: '第 2 页预览' })).toBeVisible()
+  const s2 = await pageSize(2)
+  await expect(page.getByTestId('pdf-import-size')).toContainText(`${px(s2.wPt, 300)}×${px(s2.hPt, 300)} px`)
+  await page.screenshot({ path: test.info().outputPath('pdf-dialog.png') }) // 留档供人工查看
+  await page.keyboard.press('ArrowUp')
+  await expect(page.getByTestId('pdf-page-1')).toHaveClass(/selected/)
+
+  // 预览区只看不裁：拖动不产生任何选框
+  const box = (await page.getByTestId('pdf-preview').boundingBox())!
+  await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.2)
   await page.mouse.down()
-  await page.mouse.move(box.x + box.width * 0.9, box.y + box.height * 0.85, { steps: 5 })
+  await page.mouse.move(box.x + box.width * 0.8, box.y + box.height * 0.8, { steps: 5 })
   await page.mouse.up()
+  await expect(dialog.locator('.pdf-region')).toHaveCount(0)
 
-  await page.getByTestId('pdf-import-region').click()
+  // Enter 导入第 1 页（整页 300 DPI）
+  await page.keyboard.press('Enter')
+  await expect(dialog).toHaveCount(0)
   await expect(page.locator('.empty-hint')).toHaveCount(0, { timeout: 15000 })
-  const img = await page.evaluate(() => {
-    const st = (window as any).__store.getState()
-    return { ...st.model.image }
-  })
-  console.log('[M4] PDF 区域导入:', JSON.stringify(img))
-  expect(img.sourceType).toBe('pdf')
-  expect(img.pdf).toEqual({ fileName: 'sample.pdf', page: 1, imageIndex: 1 })
-  // 300 DPI：区域 0.8×595pt × 0.5×842pt → 宽 ≈ 1983px
-  expect(img.width).toBeGreaterThan(1500)
-  expect(img.width).toBeLessThan(2500)
+  const s1 = await pageSize(1)
+  const img1 = await page.evaluate(() => ({ ...(window as any).__store.getState().model.image }))
+  console.log('[M4] PDF 整页导入:', JSON.stringify(img1))
+  expect(img1.sourceType).toBe('pdf')
+  expect(img1.pdf).toEqual({ fileName: 'sample.pdf', page: 1, imageIndex: 1 })
+  expect(img1.width).toBe(px(s1.wPt, 300))
+  expect(img1.height).toBe(px(s1.hPt, 300))
+  await expect(page.locator('.status-bar')).toContainText('图像编辑')
+
+  // 换图后会话仍在：检查器重新打开弹窗，150 DPI 双击导入第 2 页
+  await page.getByTestId('pdf-reopen').click()
+  await expect(dialog).toBeVisible()
+  await page.getByTestId('pdf-dpi').selectOption('150')
+  await page.getByTestId('pdf-page-2').dblclick()
+  await expect(dialog).toHaveCount(0)
+  await expect
+    .poll(() => page.evaluate(() => (window as any).__store.getState().model.image?.pdf?.page))
+    .toBe(2)
+  const img2 = await page.evaluate(() => ({ ...(window as any).__store.getState().model.image }))
+  expect(img2.pdf).toEqual({ fileName: 'sample.pdf', page: 2, imageIndex: 2 })
+  expect(img2.width).toBe(px(s2.wPt, 150))
+
+  // Esc 关闭弹窗，不导入
+  await page.getByTestId('pdf-reopen').click()
+  await page.keyboard.press('Escape')
+  await expect(dialog).toHaveCount(0)
+  expect(await page.evaluate(() => (window as any).__store.getState().model.image.pdf.page)).toBe(2)
 })

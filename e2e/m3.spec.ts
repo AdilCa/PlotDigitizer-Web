@@ -1,4 +1,4 @@
-// M3 验收：marker 取点主流程（scatter refine 吸附）+ 点编辑（选中/步进/删除/双击抓起）+ hover 读数
+// M3 验收：marker 取点主流程（scatter refine 吸附）+ 点编辑（选中/步进/拖动/删除）+ hover 读数
 // 夹具：large-4000x3000.png —— Y 轴线 x=200（y∈[200,2800]，8px 黑），X 轴刻度 x=600..3400。
 // refine 验证策略：在 Y 轴线旁点击，scatter 暗度质心应把点吸附到 x≈200 的轴线上（确定性特征）。
 import { expect, test } from '@playwright/test'
@@ -52,19 +52,19 @@ async function loadAndCalibrateX(page: import('@playwright/test').Page) {
 test('M3：取点主流程——scatter refine 吸附 + Confirm + 已确认计数', async ({ page }) => {
   await loadAndCalibrateX(page)
 
-  // 门控：取点工具在 X 校准后可用
-  const tool = page.getByRole('button', { name: '取点' })
+  // 门控：X 已校准但还没有序列 → 取点工具不可用，tooltip 说明原因
+  const tool = page.getByRole('button', { name: '取点', exact: true })
+  await expect(tool).toBeDisabled()
+  await expect(tool).toHaveAttribute('title', /新建序列/)
+
+  // 新建序列时必须选择图表类型；之后取点工具可用
+  await page.getByTestId('add-series').click()
+  await page.getByTestId('new-series-scatter').click()
   await expect(tool).toBeEnabled()
   await tool.click()
 
-  // 无序列时 Confirm 被拒绝（F6.3：无隐式 last()）
+  // scatter refine 吸附到 Y 轴线 x≈200
   await clickImage(page, { x: 207, y: 1500 })
-  await page.keyboard.press('Enter')
-  await expect(page.locator('.status-bar')).toContainText('请先')
-  await expect(page.getByTestId('point-count')).toHaveText('已确认 0 个')
-
-  // 新建序列后 Confirm 成功；scatter refine 吸附到 Y 轴线 x≈200
-  await page.getByTestId('add-series').click()
   await page.keyboard.press('Enter')
   await expect(page.getByTestId('point-count')).toHaveText('已确认 1 个')
   const pt = await page.evaluate(() => {
@@ -79,13 +79,12 @@ test('M3：取点主流程——scatter refine 吸附 + Confirm + 已确认计�
   expect(sel).toBe(pt.id)
 })
 
-test('M3：点编辑——选中 / 方向键步进 / 双击抓起放下 / Delete', async ({ page }) => {
+test('M3：点编辑——选中 / 方向键步进 / 拖动移动 / Delete', async ({ page }) => {
   await loadAndCalibrateX(page)
-  await page.getByRole('button', { name: '取点' }).click()
-  await page.getByTestId('add-series').click()
-
   // 手动模式：不 refine，按原位置提交（§6.3 manual 语义）
-  await page.getByTestId('chart-type').selectOption('manual')
+  await page.getByTestId('add-series').click()
+  await page.getByTestId('new-series-manual').click()
+  await page.getByRole('button', { name: '取点', exact: true }).click()
   await clickImage(page, { x: 1000, y: 1000 })
   await page.keyboard.press('Enter')
   const getPixel = () =>
@@ -110,22 +109,27 @@ test('M3：点编辑——选中 / 方向键步进 / 双击抓起放下 / Delete
   const p2 = await getPixel()
   expect(Math.abs(p2.y - (p1.y + 10))).toBeLessThanOrEqual(0.5)
 
-  // 双击抓起 → 移动 → 单击放下（§6.3，杜绝双击产生重复点）
+  // 按下时手抖（< 3 屏幕像素）：只选中，不改坐标
   const before = await getPixel()
   const scr = await toScreen(page, { x: before.x, y: before.y })
-  await page.mouse.dblclick(scr.x, scr.y)
-  await expect(page.locator('.status-bar')).toContainText('已抓起')
-  const dropTarget = await toScreen(page, { x: before.x + 80, y: before.y + 60 })
-  await page.mouse.move(dropTarget.x, dropTarget.y)
-  await page.mouse.click(dropTarget.x, dropTarget.y) // 单击放下
+  await page.mouse.move(scr.x, scr.y)
+  await page.mouse.down()
+  await page.mouse.move(scr.x + 2, scr.y + 1)
+  await page.mouse.up()
+  expect(await getPixel()).toEqual(before)
+
+  // 按住拖动：点保持按下时的相对偏移跟随指针
+  await dragImage(page, before, { x: before.x + 80, y: before.y + 60 })
   const p3 = await getPixel()
-  expect(Math.abs(p3.x - (before.x + 80))).toBeLessThanOrEqual(8)
-  expect(Math.abs(p3.y - (before.y + 60))).toBeLessThanOrEqual(8)
-  // 无重复点（双击 + 放下全过程只编辑，不新增）
-  const count = await page.evaluate(
-    () => (window as any).__store.getState().model.series[0].points.length,
-  )
+  expect(Math.abs(p3.x - (before.x + 80))).toBeLessThanOrEqual(2)
+  expect(Math.abs(p3.y - (before.y + 60))).toBeLessThanOrEqual(2)
+  // 拖动只编辑，不新增点、不留下待确认标记
+  const { count, pending } = await page.evaluate(() => {
+    const s = (window as any).__store.getState()
+    return { count: s.model.series[0].points.length, pending: s.ui.pendingMarkers.length }
+  })
   expect(count).toBe(1)
+  expect(pending).toBe(0)
 
   // Delete 删除选中点
   await page.keyboard.press('Delete')
@@ -140,9 +144,9 @@ test('M3：hover 读数（铁律 2 级联：像素 + 已校准轴数据坐标）
   const readout = page.locator('.hover-readout')
   await expect(readout).toContainText('px (1000, 1000)')
   await expect(readout).toContainText('X:')
-  // X 映射：601.5→0, 3401.5→100 → x=1000 处 X ≈ (1000-601.5)×100/2800 ≈ 14.23
+  // X 映射：刻度中心 601→0，3401→100 → x=1000 处 X = (1000-601)×100/2800 ≈ 14.25
   const text = await readout.innerText()
   const m = text.match(/X: (-?[\d.]+)/)!
-  expect(Math.abs(parseFloat(m[1]) - 14.23)).toBeLessThan(0.5)
+  expect(Math.abs(parseFloat(m[1]) - 14.25)).toBeLessThan(0.5)
   console.log(`[M3] hover 读数: ${text}`)
 })

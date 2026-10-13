@@ -23,7 +23,7 @@ function calibratedModel(withY = true) {
       { id: `${axis}2`, pos: 700, at: { x: 700, y: 700 }, fittedPos: 700, value: 60 },
     )
   }
-  const s = createSeries('A')
+  const s = createSeries('A', 'scatter')
   s.points.push(
     { id: 'p1', pixel: { x: 400, y: 250 }, name: 'A1' },
     { id: 'p2', pixel: { x: 100, y: 100 }, name: 'A2' },

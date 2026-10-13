@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   applyHandleDrag,
   clampBoxToImage,
+  cropPixelRect,
   handleCenter,
   hitCropZone,
   MIN_CROP_SIZE,
@@ -20,6 +21,23 @@ describe('normalizeBox / clampBoxToImage', () => {
 
   it('钳制到图像范围', () => {
     expect(clampBoxToImage({ x: -20, y: 5, w: 5000, h: 30 }, IMG)).toEqual({ x: 0, y: 5, w: 2000, h: 30 })
+  })
+})
+
+describe('cropPixelRect：发给 Worker 的整数矩形', () => {
+  it('外扩到完整像素：floor 起点、ceil 终点', () => {
+    expect(cropPixelRect({ x: 10.4, y: 20.6, w: 50.2, h: 30.1 }, IMG)).toEqual({ x: 10, y: 20, w: 51, h: 31 })
+  })
+
+  it('贴右/下边缘的小数选框不越界（旧实现分别 round 会多出 1px 透明边）', () => {
+    const r = cropPixelRect({ x: 1899.5, y: 1399.5, w: 100.5, h: 100.5 }, IMG)
+    expect(r.x + r.w).toBe(2000)
+    expect(r.y + r.h).toBe(1500)
+    expect(r).toEqual({ x: 1899, y: 1399, w: 101, h: 101 })
+  })
+
+  it('整数选框原样返回', () => {
+    expect(cropPixelRect(BOX, IMG)).toEqual(BOX)
   })
 })
 

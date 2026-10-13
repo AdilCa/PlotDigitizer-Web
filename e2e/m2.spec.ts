@@ -93,6 +93,18 @@ test('M2：X 轴校准主流程（拟合轴线 ±3px、刻度吸附、映射参�
 
   // ---- 引导推进：X 校准完成后状态栏指向 Y 轴
   await expect(page.locator('.status-bar')).toContainText('Y 轴')
+
+  // ---- 删除轴线：画轴工具下单击轴线选中 → Delete，连带清除刻度与刻度值
+  await page.getByRole('button', { name: '画 X 轴' }).click()
+  await clickImage(page, { x: 2000, y: 2802 })
+  await expect(page.locator('.status-bar')).toContainText('已选中 X 轴线')
+  await page.keyboard.press('Delete')
+  const afterDelete = await page.evaluate(() => {
+    const c = (window as any).__store.getState().model.calibration.x
+    return { line: c.axisLine, n: c.ticks.length }
+  })
+  expect(afterDelete).toEqual({ line: null, n: 0 })
+  await expect(page.locator('[data-testid="axis-block-x"] .badge').first()).toHaveText('未设置')
 })
 
 test('M2：拟合失败走内联反馈（铁律 5），状态不破坏', async ({ page }) => {

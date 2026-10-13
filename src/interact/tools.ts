@@ -43,8 +43,10 @@ export const toolDragHandlers: ToolDragHandlers = {
         crop.dragMove(img)
         break
       case 'drawXAxis':
+        axisTool.dragMove('x', img)
+        break
       case 'drawYAxis':
-        axisTool.dragMove(img)
+        axisTool.dragMove('y', img)
         break
       case 'markTickX':
         tickTool.dragMove('x', img)
@@ -80,18 +82,9 @@ export const toolDragHandlers: ToolDragHandlers = {
     }
   },
   onHover(screenPos) {
-    const s = useStore.getState()
-    const img = screenToImage(s.ui.viewport, screenPos)
-    setHoverImage(img) // hover 读数数据源（M3-5）
-    if (s.ui.activeTool === 'extractMarker') marker.hoverMove(img) // 抓起态跟随
+    setHoverImage(screenToImage(useStore.getState().ui.viewport, screenPos)) // hover 读数数据源（M3-5）
   },
   onHoverEnd() {
     setHoverImage(null)
-  },
-  onToolDoubleClick(screenPos) {
-    const s = useStore.getState()
-    if (s.ui.activeTool === 'extractMarker') {
-      marker.dblClick(screenToImage(s.ui.viewport, screenPos))
-    }
   },
 }

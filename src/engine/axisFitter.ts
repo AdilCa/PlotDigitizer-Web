@@ -5,6 +5,7 @@
 //       中位数定位置（天然抗离群，不剔点）；有效采样点 <4 → 报错（内联反馈，铁律 5）
 // 纯函数，零 DOM 依赖；gray 由调用方（Worker）传入，绝不在此转换图像。
 import type { AxisId, PixelPoint } from '../state/model'
+import { grayAtIndex } from './gray'
 
 export const AXIS_FITTER_DEFAULTS = {
   minStep: 10,
@@ -25,14 +26,6 @@ export interface AxisFitDiagnostics {
 export type AxisFitResult =
   | { ok: true; position: number; diagnostics: AxisFitDiagnostics }
   | { ok: false; error: string; diagnostics: AxisFitDiagnostics }
-
-/** 与 C++ 一致的整型像素访问：越界视为白（255），坐标截断取整 */
-function grayAt(gray: Uint8Array, width: number, height: number, x: number, y: number): number {
-  const px = Math.trunc(x)
-  const py = Math.trunc(y)
-  if (px < 0 || px >= width || py < 0 || py >= height) return 255
-  return gray[py * width + px]
-}
 
 export function fitAxis(
   gray: Uint8Array,
@@ -78,6 +71,8 @@ export function fitAxis(
       const frac = i / Math.max(1, nSamples - 1)
       const px = a.x + (b.x - a.x) * frac
       const py = a.y + (b.y - a.y) * frac
+      const ix = Math.floor(px)
+      const iy = Math.floor(py)
 
       // 垂直于轴方向取灰度剖面（X 轴 → 垂直剖面；Y 轴 → 水平剖面）
       let pMax = 0
@@ -85,7 +80,7 @@ export function fitAxis(
       let minIdx = 0
       const prof: number[] = []
       for (let s = -scanHalf; s <= scanHalf; s++) {
-        const val = axis === 'x' ? grayAt(gray, width, height, px, py + s) : grayAt(gray, width, height, px + s, py)
+        const val = axis === 'x' ? grayAtIndex(gray, width, height, ix, iy + s) : grayAtIndex(gray, width, height, ix + s, iy)
         prof.push(val)
         if (val > pMax) pMax = val
         if (val < pMin) {
@@ -106,11 +101,13 @@ export function fitAxis(
       const centerS = (leftIdx + rightIdx) / 2 - scanHalf
 
       if (axis === 'x') {
-        positions.push(py + centerS)
-        diag.samplePoints.push({ x: px, y: py + centerS })
+        const pos = iy + centerS + 0.5
+        positions.push(pos)
+        diag.samplePoints.push({ x: px, y: pos })
       } else {
-        positions.push(px + centerS)
-        diag.samplePoints.push({ x: px + centerS, y: py })
+        const pos = ix + centerS + 0.5
+        positions.push(pos)
+        diag.samplePoints.push({ x: pos, y: py })
       }
     }
   }

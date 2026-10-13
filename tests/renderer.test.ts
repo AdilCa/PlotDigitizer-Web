@@ -72,6 +72,31 @@ describe('校准层（轴线 + 刻度）', () => {
     expect(tick.fill).toBe(CANVAS_COLORS.success)
   })
 
+  it('刻度位置：未拟合画在点击处 at，拟合后吸附到轴线上的投影', () => {
+    cmd.loadImage(IMG)
+    cmd.setAxisLine('x', 500)
+    const t1 = cmd.addTick('x', { x: 100, y: 512 })!
+    const tickAt = () =>
+      circles(buildScene(state(), VP1).primitives).find(
+        (c) => c.kind === 'circle' && Math.abs(c.r - SCREEN_SIZE.tickRadius) < 1e-9,
+      )!
+    expect(tickAt()).toMatchObject({ x: 100, y: 512 })
+    cmd.applyTickFit('x', { [t1]: 101.5 })
+    expect(tickAt()).toMatchObject({ x: 101.5, y: 500 })
+  })
+
+  it('选中轴线：轴线下方有宽的半透明光晕', () => {
+    cmd.loadImage(IMG)
+    cmd.setAxisLine('x', 500)
+    const halo = () =>
+      lines(buildScene(state(), VP1).primitives).find(
+        (l) => l.kind === 'line' && l.y1 === 500 && l.width === SCREEN_SIZE.selectedAxisWidth,
+      )
+    expect(halo()).toBeUndefined()
+    cmd.selectAxis('x')
+    expect(halo()).toMatchObject({ color: CANVAS_COLORS.ink, alpha: 0.25 })
+  })
+
   it('选中刻度：白圈 + ink 描边焦点环', () => {
     cmd.loadImage(IMG)
     cmd.setAxisLine('x', 500)
@@ -94,7 +119,7 @@ describe('校准层（轴线 + 刻度）', () => {
 describe('数据点层（铁律 4：全程可见）', () => {
   it('已确认点 40% 透明、按序列着色、半径屏幕恒定 r=4px', () => {
     cmd.loadImage(IMG)
-    cmd.addSeries('A')
+    cmd.addSeries('scatter', 'A')
     cmd.setPendingMarker({ x: 150, y: 300 })
     cmd.confirmMarker()
     cmd.selectPoint(null) // confirm 自动选中新点；取消选中后才是 40% 透明态
@@ -112,8 +137,8 @@ describe('数据点层（铁律 4：全程可见）', () => {
 
   it('不同序列不同颜色；选中点实色 + 焦点环', () => {
     cmd.loadImage(IMG)
-    cmd.addSeries('A')
-    cmd.addSeries('B')
+    cmd.addSeries('scatter', 'A')
+    cmd.addSeries('scatter', 'B')
     cmd.setPendingMarker({ x: 10, y: 10 })
     cmd.confirmMarker() // 入 B（活动序列）
     cmd.setActiveSeries(state().model.series[0].id)
@@ -145,6 +170,54 @@ describe('数据点层（铁律 4：全程可见）', () => {
     expect(dot.alpha).toBe(1)
     const cross = lines(prims).filter((l) => l.color === CANVAS_COLORS.white)
     expect(cross).toHaveLength(2)
+  })
+})
+
+describe('吸附范围可视化（取点工具）', () => {
+  const windows = (prims: Primitive[]) =>
+    prims.filter((p) => p.kind === 'rect' && p.stroke === CANVAS_COLORS.warning)
+
+  function setup(chartType: 'scatter' | 'bar' | 'manual') {
+    cmd.loadImage(IMG)
+    cmd.setAxisLine('x', 1400)
+    const t1 = cmd.addTick('x', { x: 100, y: 1400 })!
+    const t2 = cmd.addTick('x', { x: 200, y: 1400 })!
+    cmd.applyTickFit('x', { [t1]: 100, [t2]: 200 })
+    cmd.setTickValue('x', t1, 0)
+    cmd.setTickValue('x', t2, 10)
+    const sid = cmd.addSeries(chartType, 'A')
+    cmd.setActiveTool('extractMarker')
+    return sid
+  }
+
+  it('散点：未确认标记周围画出 (2r+1)² 窗口，随半径变化', () => {
+    const sid = setup('scatter')
+    cmd.setPendingMarker({ x: 400.3, y: 300.8 })
+    expect(windows(buildScene(state(), VP1).primitives)).toEqual([
+      expect.objectContaining({ x: 392, y: 292, w: 17, h: 17, alpha: 0.9 }),
+    ])
+    cmd.setScatterRadius(sid, 3)
+    expect(windows(buildScene(state(), VP1).primitives)[0]).toMatchObject({ x: 397, y: 297, w: 7, h: 7 })
+  })
+
+  it('光标处浅色预览；光标压在未确认标记上时不重复画', () => {
+    setup('scatter')
+    cmd.setHoverImage({ x: 600, y: 600 })
+    expect(windows(buildScene(state(), VP1).primitives)).toEqual([expect.objectContaining({ alpha: 0.45 })])
+    cmd.setPendingMarker({ x: 600, y: 600 })
+    expect(windows(buildScene(state(), VP1).primitives)).toHaveLength(1)
+  })
+
+  it('柱状画扫描条带；手动序列与其他工具不画', () => {
+    const sid = setup('bar')
+    cmd.setPendingMarker({ x: 400, y: 300 })
+    expect(windows(buildScene(state(), VP1).primitives)[0]).toMatchObject({ x: 395, y: 300, w: 11, h: 41 })
+    cmd.setChartType(sid, 'manual')
+    expect(windows(buildScene(state(), VP1).primitives)).toHaveLength(0)
+    cmd.setChartType(sid, 'bar')
+    cmd.setActiveTool('drawXAxis')
+    cmd.setHoverImage({ x: 600, y: 600 })
+    expect(windows(buildScene(state(), VP1).primitives)).toHaveLength(0)
   })
 })
 

@@ -1,6 +1,10 @@
 // gray.ts — 灰度化（§4.1：一次性，Rec.601，与 cv::COLOR_BGR2GRAY / Qt Grayscale8 一致）
 // 纯函数，零 DOM 依赖；整张图只做一次，所有后续算法共享该 buffer（在 Worker 中执行）。
 // 修复 C++ 版性能 bug 的契约保证：refine 等算法接收本 buffer 作为参数，绝不自行转换图像。
+//
+// 像素坐标约定（engine 全体共用，与渲染层 drawImage(0,0) 一致）：
+// 像素 (i, j) 覆盖连续图像坐标 [i, i+1) × [j, j+1)，中心为 (i+0.5, j+0.5)。
+// 连续坐标 → 像素下标一律 Math.floor；engine 输出的位置一律是连续坐标。
 
 /**
  * RGBA → 灰度。gray[i] = round(0.299R + 0.587G + 0.114B)
@@ -17,4 +21,10 @@ export function toGray(rgba: Uint8ClampedArray, width: number, height: number): 
     out[i] = Math.round(0.299 * rgba[j] + 0.587 * rgba[j + 1] + 0.114 * rgba[j + 2])
   }
   return out
+}
+
+/** 按像素下标取灰度；越界视为白（255） */
+export function grayAtIndex(gray: Uint8Array, width: number, height: number, ix: number, iy: number): number {
+  if (ix < 0 || ix >= width || iy < 0 || iy >= height) return 255
+  return gray[iy * width + ix]
 }

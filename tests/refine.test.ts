@@ -1,93 +1,89 @@
-// refine.test.ts — 点优化（§4.4）合成灰度图单测
+// refine.test.ts — 柱状 refine 与 refine 范围可视化（§4.4）合成灰度图单测；散点见 markerBlob.test.ts
 import { describe, expect, it } from 'vitest'
-import { refineBar, refineScatter, REFINE_DEFAULTS } from '../src/engine/refine'
+import { refineBar, refineWindow, REFINE_DEFAULTS } from '../src/engine/refine'
 
 function makeGray(w: number, h: number, fill = 255): Uint8Array {
   return new Uint8Array(w * h).fill(fill)
 }
 
-/** 实心圆点（模拟散点 marker） */
-function dot(gray: Uint8Array, w: number, cx: number, cy: number, r: number, val = 0): void {
-  const h = gray.length / w
-  for (let y = Math.max(0, cy - r); y <= Math.min(h - 1, cy + r); y++) {
-    for (let x = Math.max(0, cx - r); x <= Math.min(w - 1, cx + r); x++) {
-      if ((x - cx) ** 2 + (y - cy) ** 2 <= r * r) gray[y * w + x] = val
-    }
-  }
-}
-
-describe('refineScatter：暗度质心（r=8）', () => {
-  it('偏心点击吸附到圆点中心', () => {
-    const W = 100
-    const H = 100
-    const gray = makeGray(W, H)
-    dot(gray, W, 50, 60, 4)
-    const out = refineScatter({ x: 54, y: 64 }, gray, W, H)
-    expect(Math.abs(out.x - 50)).toBeLessThanOrEqual(1)
-    expect(Math.abs(out.y - 60)).toBeLessThanOrEqual(1)
-  })
-
-  it('窗口内全白（无特征）→ 原样返回，不凭空位移', () => {
-    const W = 100
-    const H = 100
-    const gray = makeGray(W, H)
-    const out = refineScatter({ x: 30, y: 30 }, gray, W, H)
-    expect(out).toEqual({ x: 30, y: 30 })
-  })
-
-  it('边缘点：窗口越界部分按白处理，质心仍落在点上', () => {
-    const W = 100
-    const H = 100
-    const gray = makeGray(W, H)
-    dot(gray, W, 3, 3, 3)
-    const out = refineScatter({ x: 2, y: 2 }, gray, W, H)
-    expect(Math.abs(out.x - 3)).toBeLessThanOrEqual(1.5)
-    expect(Math.abs(out.y - 3)).toBeLessThanOrEqual(1.5)
-  })
-})
-
-describe('refineBar：由外向内首个强跳变 + 多剖面投票', () => {
-  it('默认向下：点在柱顶上方 → 吸附到柱顶边缘', () => {
+describe('refineBar：±5px 平均剖面 + 首个跳变区段取最大', () => {
+  it('默认向下：点在柱顶上方 → 吸附到柱顶边缘（像素 119/120 之间 = 120.0）', () => {
     const W = 100
     const H = 200
     const gray = makeGray(W, H)
     // 柱子：y=120..199, x=40..60 黑色实心
     for (let y = 120; y < 200; y++) for (let x = 40; x <= 60; x++) gray[y * W + x] = 0
-    const out = refineBar({ x: 50, y: 100 }, gray, W, H) // 柱顶上方 20px
-    expect(Math.abs(out.y - 120)).toBeLessThanOrEqual(1)
-    expect(out.x).toBe(50)
+    for (const y0 of [100, 100.4, 100.9, 117.2]) {
+      const out = refineBar({ x: 50, y: y0 }, gray, W, H) // 与起点小数部分无关
+      expect(out).toEqual({ x: 50, y: 120, snapped: true })
+    }
   })
 
-  it('方向向上：点在柱底下方 → 吸附到柱底边缘', () => {
+  it('方向向上：点在柱底下方 → 吸附到柱底边缘（像素 120/121 之间 = 121.0）', () => {
     const W = 100
     const H = 200
     const gray = makeGray(W, H)
     for (let y = 50; y <= 120; y++) for (let x = 40; x <= 60; x++) gray[y * W + x] = 0
     const out = refineBar({ x: 50, y: 140 }, gray, W, H, 'up')
-    expect(Math.abs(out.y - 120)).toBeLessThanOrEqual(1)
+    expect(out.y).toBe(121)
   })
 
-  it('斜边不误判：点击水平偏离柱边 3px，投票仍锁柱顶', () => {
+  it('点击靠近柱边：平均剖面仍有足够跳变', () => {
     const W = 100
     const H = 200
     const gray = makeGray(W, H)
     for (let y = 120; y < 200; y++) for (let x = 40; x <= 60; x++) gray[y * W + x] = 0
-    // 点击 x=43（柱内偏左），±5px 剖面大多仍落在柱体上
     const out = refineBar({ x: 43, y: 100 }, gray, W, H)
-    expect(Math.abs(out.y - 120)).toBeLessThanOrEqual(1)
+    expect(out.y).toBe(120)
   })
 
-  it('扫描全程无跳变 → 原样返回', () => {
+  it('软边（每像素 Δ=8，低于单像素旧阈值 40）：取跳变区段内梯度最大处', () => {
     const W = 100
     const H = 200
     const gray = makeGray(W, H)
-    const out = refineBar({ x: 50, y: 50 }, gray, W, H)
-    expect(out).toEqual({ x: 50, y: 50 })
+    // 柱顶 6 像素渐变，最陡处在 y=116/117 之间
+    const ramp = [240, 225, 180, 120, 90, 80]
+    for (let y = 114; y < 200; y++) {
+      const v = y - 114 < ramp.length ? ramp[y - 114] : 80
+      for (let x = 30; x <= 70; x++) gray[y * W + x] = v
+    }
+    const out = refineBar({ x: 50, y: 90 }, gray, W, H)
+    expect(out.snapped).toBe(true)
+    expect(out.y).toBe(117)
   })
 
-  it('投票剖面偏移配置符合 §4.4（±5px 含 0）', () => {
-    expect(REFINE_DEFAULTS.barProfileOffsets).toContain(0)
-    expect(Math.min(...REFINE_DEFAULTS.barProfileOffsets)).toBe(-5)
-    expect(Math.max(...REFINE_DEFAULTS.barProfileOffsets)).toBe(5)
+  it('扫描范围内无跳变 → 原样返回，snapped=false；范围参数生效', () => {
+    const W = 100
+    const H = 200
+    const gray = makeGray(W, H)
+    expect(refineBar({ x: 50, y: 50 }, gray, W, H)).toEqual({ x: 50, y: 50, snapped: false })
+    for (let y = 120; y < 200; y++) for (let x = 40; x <= 60; x++) gray[y * W + x] = 0
+    expect(refineBar({ x: 50, y: 60 }, gray, W, H, 'down', 40).snapped).toBe(false)
+    expect(refineBar({ x: 50, y: 60 }, gray, W, H, 'down', 80).y).toBe(120)
+  })
+
+  it('平均剖面半宽符合 §4.4（±5px）', () => {
+    expect(REFINE_DEFAULTS.barHalfWidth).toBe(5)
+  })
+})
+
+describe('refineWindow：可视化范围与实际作用范围一致', () => {
+  it('scatter：以点击像素为中心的 (2r+1)² 搜索框（与 refineScatter 的搜索框同一公式）', () => {
+    for (const r of [3, 8, 15]) {
+      const win = refineWindow({ x: 100.7, y: 100.2 }, { mode: 'scatter', radius: r })
+      expect(win).toEqual({ x: 100 - r, y: 100 - r, w: 2 * r + 1, h: 2 * r + 1 })
+    }
+  })
+
+  it.each(['down', 'up', 'left', 'right'] as const)('bar %s：条带 = 扫描方向 span × 垂直 ±barHalfWidth', (dir) => {
+    const hw = REFINE_DEFAULTS.barHalfWidth
+    const win = refineWindow({ x: 100.5, y: 100.5 }, { mode: 'bar', direction: dir, span: 30 })
+    const vertical = dir === 'down' || dir === 'up'
+    expect(vertical ? win.w : win.h).toBe(2 * hw + 1)
+    expect(vertical ? win.h : win.w).toBe(31)
+    // 窗口必须从点击像素起、朝扫描方向延伸
+    expect(win.x <= 100 && 100 < win.x + win.w && win.y <= 100 && 100 < win.y + win.h).toBe(true)
+    const far = { down: [100, 130], up: [100, 70], right: [130, 100], left: [70, 100] }[dir]
+    expect(far[0] >= win.x && far[0] < win.x + win.w && far[1] >= win.y && far[1] < win.y + win.h).toBe(true)
   })
 })

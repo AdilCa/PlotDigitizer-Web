@@ -26,6 +26,20 @@ export interface RefineItem {
   y: number
   mode: 'scatter' | 'bar'
   barDirection?: 'up' | 'down' | 'left' | 'right'
+  barSpan?: number
+  scatterRadius?: number
+}
+
+/** refine 结果：snapped = false 表示未找到特征，按原位置返回 */
+export interface RefinedItem {
+  refId: string
+  x: number
+  y: number
+  snapped: boolean
+  /** 未吸附原因（scatter） */
+  reason?: string
+  /** 吸附所用像素的凸包（scatter，图像坐标） */
+  outline?: FitPixelPoint[]
 }
 
 /** 标注截图的标记点（§7.2：按序列着色，颜色由主线程色盘决定） */
@@ -33,11 +47,20 @@ export interface AnnotatedMarker {
   x: number
   y: number
   color: string
+  /** 点名，标在标记旁 */
+  name: string
 }
 
 export type WorkerRequest =
   | { id: number; type: 'loadImage'; file: Blob }
-  | { id: number; type: 'crop'; rect: CropRect }
+  | {
+      id: number
+      type: 'crop'
+      /** 整数像素矩形，已钳制在当前图像内 */
+      rect: CropRect
+      /** 发起请求时主线程的图像尺寸；与 Worker 当前尺寸不符即拒绝（图像已变化） */
+      base: { width: number; height: number }
+    }
   | {
       id: number
       type: 'fitAxis'
@@ -51,7 +74,8 @@ export type WorkerRequest =
       type: 'fitTicks'
       axis: 'x' | 'y'
       ticks: FitTickInput[]
-      scanRadius?: number
+      /** 沿轴方向扫描半宽（px），缺省用 engine 默认值 */
+      scanHalf?: number
     }
   | { id: number; type: 'refinePoints'; items: RefineItem[] }
   | { id: number; type: 'exportImagePng' }
@@ -68,6 +92,8 @@ export type WorkerResponse =
       height: number
       /** 新显示轨缩略图（长边 ≤2048，transferable；§5.3 步骤 3） */
       thumbnail: ImageBitmap
+      /** 裁剪后图像在原始源图中的区域（累计；主线程显示轨直接采用，不再自行累加） */
+      region: CropRect
     }
   | {
       id: number
@@ -105,7 +131,7 @@ export type WorkerResponse =
       reqType: 'refinePoints'
       ok: true
       /** 与请求 items 等长同序（refId 原样回带） */
-      refined: { refId: string; x: number; y: number }[]
+      refined: RefinedItem[]
     }
   /** 失败响应带算法诊断（扫描带/候选线等，纯 JSON），供内联可视化（铁律 5） */
   | { id: number; reqType: string; ok: false; error: string; diagnostics?: unknown }

@@ -43,7 +43,7 @@ describe('projectFile：.pdproj 工程读写', () => {
       { id: 't1', pos: 100, at: { x: 100, y: 500 }, fittedPos: 100, value: 0 },
       { id: 't2', pos: 700, at: { x: 700, y: 500 }, fittedPos: 700, value: 60 },
     )
-    const s = createSeries('A')
+    const s = createSeries('A', 'scatter')
     s.points.push({ id: 'p1', pixel: { x: 300, y: 400 }, name: 'A1' })
     model.series.push(s)
     model.activeSeriesId = s.id

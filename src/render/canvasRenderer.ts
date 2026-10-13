@@ -3,14 +3,15 @@
 // 分两步：
 //   buildScene(state, viewport) → Scene   纯函数，可单测
 //   paint(ctx, scene, ...)                唯一副作用出口，仅执行绘制
-// 图层顺序：底图 → 调试扫描带 → 校准（轴线/刻度）→ 数据点 → 当前 marker → 调试点线。
+// 图层顺序：底图 → 调试扫描带 → 校准（轴线/刻度）→ 数据点 → 吸附轮廓 → 吸附范围 → 当前 marker → 调试点线。
 // 叠加层图形尺寸屏幕空间恒定（§5.2）：buildScene 内以 1/scale 把屏幕像素换算回图像空间，
 // 因此缩放时点标记半径、线宽的屏幕像素尺寸不变。
 // 视觉规范：doc/ui-style-draft.md §3.2/§3.3（单色仪器风 + 画布语义色 + 序列色盘）。
 
 import type { AxisCalibration, AxisId } from '../state/model'
 import type { AppState, DebugOverlay } from '../state/store'
-import { tickFitted } from '../state/selectors'
+import { tickAnchor, tickFitted } from '../state/selectors'
+import { refineWindow } from '../engine/refine'
 import type { Viewport } from './viewport'
 
 // ---------------------------------------------------------------- 设计 token（ui-style-draft §3）
@@ -43,6 +44,7 @@ export function seriesColor(index: number): string {
 /** 屏幕空间恒定尺寸（px，§5.2） */
 export const SCREEN_SIZE = {
   axisWidth: 2,
+  selectedAxisWidth: 10,
   tickRadius: 5,
   markerRadius: 4,
   focusRingGap: 2,
@@ -77,6 +79,7 @@ export type Primitive =
       alpha: number
     }
   | { kind: 'rect'; x: number; y: number; w: number; h: number; fill: string | null; stroke: string | null; strokeWidth: number; alpha: number }
+  | { kind: 'polygon'; points: { x: number; y: number }[]; stroke: string; strokeWidth: number; alpha: number }
 
 export interface Scene {
   image: { width: number; height: number } | null
@@ -96,6 +99,8 @@ export function buildScene(state: AppState, vp: Viewport): Scene {
   pushAxis(state, 'x', px, out)
   pushAxis(state, 'y', px, out)
   pushPoints(state, px, out)
+  pushRefineOutlines(state, px, out)
+  pushRefineWindows(state, px, out)
   pushPendingMarker(state, px, out)
   pushDraftLine(state, px, out)
   pushCropOverlay(state, px, out)
@@ -177,8 +182,10 @@ function pushAxis(state: AppState, axis: AxisId, px: (n: number) => number, out:
   const image = state.model.image!
   if (cal.skipped || cal.axisLine === null) return
   // 替换预告（铁律 3）：正在用画轴工具拖草稿线且该轴已有轴线 → 既有轴线 warning 高亮，松开即替换
+  const d = state.ui.draftLine
   const replacing =
-    state.ui.draftLine !== null &&
+    d !== null &&
+    (d.a.x !== d.b.x || d.a.y !== d.b.y) &&
     ((axis === 'x' && state.ui.activeTool === 'drawXAxis') ||
       (axis === 'y' && state.ui.activeTool === 'drawYAxis'))
   // 拟合成功轴线：success 实线 2px（屏幕恒定），强制水平/垂直横贯全图（§4.2）
@@ -186,6 +193,10 @@ function pushAxis(state: AppState, axis: AxisId, px: (n: number) => number, out:
     axis === 'x'
       ? [0, cal.axisLine, image.width, cal.axisLine]
       : [cal.axisLine, 0, cal.axisLine, image.height]
+  if (state.ui.selectedAxis === axis) {
+    // 选中轴线：下方加一条宽的半透明 ink 光晕（Delete 删除）
+    out.push({ kind: 'line', x1, y1, x2, y2, color: CANVAS_COLORS.ink, width: px(SCREEN_SIZE.selectedAxisWidth), alpha: 0.25 })
+  }
   out.push({
     kind: 'line',
     x1, y1, x2, y2,
@@ -195,8 +206,8 @@ function pushAxis(state: AppState, axis: AxisId, px: (n: number) => number, out:
   })
 
   for (const t of cal.ticks) {
-    const cx = axis === 'x' ? t.pos : cal.axisLine
-    const cy = axis === 'x' ? cal.axisLine : t.pos
+    // 未拟合画在点击处，拟合后吸附到轴线上的投影（§4.3）
+    const { x: cx, y: cy } = tickAnchor(cal, axis, t)
     const r = px(SCREEN_SIZE.tickRadius)
     if (state.ui.selectedTickId === t.id) pushSelectionRing(cx, cy, r, px, out)
     const fitted = tickFitted(t)
@@ -236,16 +247,54 @@ function pushPoints(state: AppState, px: (n: number) => number, out: Primitive[]
   })
 }
 
+/**
+ * 吸附范围可视化（取点工具，scatter / bar 序列）：每个未确认标记画出 Confirm 时 refine 实际读取的像素范围；
+ * 光标处画浅色预览，点下去之前就能把窗口调到刚好框住一个标记。
+ */
+function pushRefineWindows(state: AppState, px: (n: number) => number, out: Primitive[]): void {
+  if (state.ui.activeTool !== 'extractMarker') return
+  const series = state.model.series.find((x) => x.id === state.model.activeSeriesId)
+  if (!series || series.chartType === 'manual') return
+  const params =
+    series.chartType === 'scatter'
+      ? ({ mode: 'scatter', radius: series.scatterRadius } as const)
+      : ({ mode: 'bar', direction: series.barDirection, span: series.barSpan } as const)
+  const box = (p: { x: number; y: number }, alpha: number): Primitive => ({
+    kind: 'rect',
+    ...refineWindow(p, params),
+    fill: null,
+    stroke: CANVAS_COLORS.warning,
+    strokeWidth: px(1),
+    alpha,
+  })
+  const pending = state.ui.pendingMarkers
+  for (const m of pending) out.push(box(m, 0.9))
+  const h = state.ui.hoverImage
+  if (h && !pending.some((m) => Math.hypot(m.x - h.x, m.y - h.y) < px(SCREEN_SIZE.markerRadius))) {
+    out.push(box(h, 0.45))
+  }
+}
+
+/** 最近一次 Confirm 的散点吸附轮廓：显示 refine 实际抓到了哪块像素；点被移动 / 删除后不再画 */
+function pushRefineOutlines(state: AppState, px: (n: number) => number, out: Primitive[]): void {
+  if (state.ui.activeTool !== 'extractMarker') return
+  for (const o of state.ui.refineOutlines) {
+    const p = state.model.series.flatMap((s) => s.points).find((q) => q.id === o.pointId)
+    if (!p || p.pixel.x !== o.at.x || p.pixel.y !== o.at.y) continue
+    out.push({ kind: 'polygon', points: o.outline, stroke: CANVAS_COLORS.success, strokeWidth: px(1), alpha: 0.9 })
+  }
+}
+
 function pushPendingMarker(state: AppState, px: (n: number) => number, out: Primitive[]): void {
-  const m = state.ui.pendingMarker
-  if (!m) return
   const r = px(SCREEN_SIZE.markerRadius)
-  // 当前 marker：ink 实心 + 中心十字（ui-style §3.2）
-  out.push({ kind: 'circle', x: m.x, y: m.y, r, fill: CANVAS_COLORS.ink, stroke: null, strokeWidth: 0, alpha: 1 })
   const arm = r * 0.9
   const w = px(SCREEN_SIZE.markerCrossWidth)
-  out.push({ kind: 'line', x1: m.x - arm, y1: m.y, x2: m.x + arm, y2: m.y, color: CANVAS_COLORS.white, width: w, alpha: 1 })
-  out.push({ kind: 'line', x1: m.x, y1: m.y - arm, x2: m.x, y2: m.y + arm, color: CANVAS_COLORS.white, width: w, alpha: 1 })
+  // 未确认 marker：ink 实心 + 中心十字（ui-style §3.2）
+  for (const m of state.ui.pendingMarkers) {
+    out.push({ kind: 'circle', x: m.x, y: m.y, r, fill: CANVAS_COLORS.ink, stroke: null, strokeWidth: 0, alpha: 1 })
+    out.push({ kind: 'line', x1: m.x - arm, y1: m.y, x2: m.x + arm, y2: m.y, color: CANVAS_COLORS.white, width: w, alpha: 1 })
+    out.push({ kind: 'line', x1: m.x, y1: m.y - arm, x2: m.x, y2: m.y + arm, color: CANVAS_COLORS.white, width: w, alpha: 1 })
+  }
 }
 
 /** 画轴工具的手绘草稿线：ink 虚线 2px（ui-style §3.2 交互预览） */
@@ -285,6 +334,9 @@ export function paint(
 
   ctx.setTransform(dpr * vp.scale, 0, 0, dpr * vp.scale, dpr * vp.offsetX, dpr * vp.offsetY)
   if (bitmap && scene.image) {
+    // 透明底图铺白，与 Worker 灰度化（同样铺白）看到的一致
+    ctx.fillStyle = CANVAS_COLORS.white
+    ctx.fillRect(0, 0, scene.image.width, scene.image.height)
     ctx.imageSmoothingEnabled = vp.scale < 8
     ctx.drawImage(bitmap, 0, 0, scene.image.width, scene.image.height)
     ctx.imageSmoothingEnabled = true
@@ -326,6 +378,17 @@ export function paint(
           ctx.lineWidth = p.strokeWidth
           ctx.strokeRect(p.x, p.y, p.w, p.h)
         }
+        break
+      case 'polygon':
+        if (p.points.length < 2) break
+        ctx.strokeStyle = p.stroke
+        ctx.lineWidth = p.strokeWidth
+        ctx.setLineDash([])
+        ctx.beginPath()
+        ctx.moveTo(p.points[0].x, p.points[0].y)
+        for (const q of p.points.slice(1)) ctx.lineTo(q.x, q.y)
+        ctx.closePath()
+        ctx.stroke()
         break
     }
   }

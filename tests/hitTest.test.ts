@@ -1,6 +1,6 @@
 // hitTest.test.ts — 画布图元命中测试
 import { describe, expect, it } from 'vitest'
-import { hitPoint, hitTick } from '../src/interact/hitTest'
+import { hitAxisLine, hitPoint, hitTick } from '../src/interact/hitTest'
 import { createEmptyModel } from '../src/state/model'
 import type { AxisCalibration } from '../src/state/model'
 
@@ -12,28 +12,43 @@ function calWithTick(): AxisCalibration {
   return cal
 }
 
-describe('hitTick：刻度命中（§4.3 刻度中心 = 轴线上的投影点）', () => {
-  it('X 轴：命中 (t.pos, axisLine) 附近', () => {
+describe('hitTick：刻度命中（按显示位置：未拟合 = 点击处，已拟合 = 轴线上的投影）', () => {
+  it('X 轴未拟合：命中点击处 at=(200,512) 附近，轴线上不命中', () => {
     const cal = calWithTick()
-    expect(hitTick(cal, 'x', { x: 203, y: 502 }, 8)?.id).toBe('t1')
-    expect(hitTick(cal, 'x', { x: 300, y: 500 }, 8)).toBeNull()
+    expect(hitTick(cal, 'x', { x: 203, y: 514 }, 8)?.id).toBe('t1')
+    expect(hitTick(cal, 'x', { x: 200, y: 500 }, 8)).toBeNull()
   })
 
-  it('点击处偏离轴线但在容差内仍命中（欧氏距离）', () => {
+  it('X 轴已拟合：命中 (pos, axisLine)，原点击处不再命中', () => {
     const cal = calWithTick()
-    // (206, 506) 距 (200, 500) = √(36+36) ≈ 8.49 > 8 → 不命中
-    expect(hitTick(cal, 'x', { x: 206, y: 506 }, 8)).toBeNull()
-    // (204, 504) 距 (200, 500) ≈ 5.66 ≤ 8 → 命中
-    expect(hitTick(cal, 'x', { x: 204, y: 504 }, 8)?.id).toBe('t1')
+    cal.ticks[0].pos = 201
+    cal.ticks[0].fittedPos = 201
+    expect(hitTick(cal, 'x', { x: 204, y: 502 }, 8)?.id).toBe('t1')
+    expect(hitTick(cal, 'x', { x: 200, y: 512 }, 8)).toBeNull()
   })
 
-  it('Y 轴：命中 (axisLine, t.pos)', () => {
+  it('欧氏距离容差', () => {
+    const cal = calWithTick()
+    // (206, 518) 距 (200, 512) ≈ 8.49 > 8 → 不命中；(204, 516) ≈ 5.66 → 命中
+    expect(hitTick(cal, 'x', { x: 206, y: 518 }, 8)).toBeNull()
+    expect(hitTick(cal, 'x', { x: 204, y: 516 }, 8)?.id).toBe('t1')
+  })
+
+  it('Y 轴未拟合：命中点击处 at', () => {
     const model = createEmptyModel()
     const cal = model.calibration.y
     cal.axisLine = 300
     cal.ticks.push({ id: 'u1', pos: 700, at: { x: 250, y: 700 }, fittedPos: null, value: null })
-    expect(hitTick(cal, 'y', { x: 302, y: 698 }, 8)?.id).toBe('u1')
-    expect(hitTick(cal, 'y', { x: 700, y: 300 }, 8)).toBeNull()
+    expect(hitTick(cal, 'y', { x: 252, y: 698 }, 8)?.id).toBe('u1')
+    expect(hitTick(cal, 'y', { x: 300, y: 700 }, 8)).toBeNull()
+  })
+
+  it('hitAxisLine：按垂直距离命中，跳过的轴不命中', () => {
+    const cal = calWithTick()
+    expect(hitAxisLine(cal, 'x', { x: 1234, y: 506 }, 8)).toBe(true)
+    expect(hitAxisLine(cal, 'x', { x: 10, y: 509 }, 8)).toBe(false)
+    cal.skipped = true
+    expect(hitAxisLine(cal, 'x', { x: 10, y: 500 }, 8)).toBe(false)
   })
 
   it('无轴线 → 不命中', () => {
@@ -54,6 +69,8 @@ describe('hitPoint：数据点命中（§6.3，M3-3 屏幕恒定半径换算）'
       name: 'A',
       chartType: 'scatter',
       barDirection: 'down',
+      barSpan: 40,
+      scatterRadius: 8,
       pointPrefix: 'A',
       nextPointSeq: 2,
       points: [
@@ -66,6 +83,8 @@ describe('hitPoint：数据点命中（§6.3，M3-3 屏幕恒定半径换算）'
       name: 'B',
       chartType: 'scatter',
       barDirection: 'down',
+      barSpan: 40,
+      scatterRadius: 8,
       pointPrefix: 'B',
       nextPointSeq: 1,
       points: [{ id: 'p3', pixel: { x: 108, y: 108 }, name: 'B1' }],

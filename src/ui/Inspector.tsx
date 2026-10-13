@@ -1,6 +1,6 @@
 // Inspector.tsx — 右侧检查器面板（248px，§6.2 校准状态的常驻落点）
 // 组成：校准检查清单（整行可点击跳工具，铁律 4 引导）+ 每轴编辑块（scaleType / 跳过 / 刻度行 /
-// 拟合按钮 / 映射参数）+ 序列/点列表（M5-1）+ PDF 图库 + 导出表单。
+// 拟合按钮 / 映射参数）+ 序列/点列表（M5-1）+ PDF 会话入口（重新打开选页弹窗）+ 导出表单。
 // 拟合按钮 = 门控置灰 + tooltip 原因（铁律 5）；拟合在 Worker 执行（§3 决策 4）。
 import { useState } from 'react'
 import { useStore } from '../state/store'
@@ -10,6 +10,7 @@ import {
   addSeries,
   applyTickFit,
   confirmMarkerRefined,
+  deleteAxisLine,
   deletePoint,
   deleteSeries,
   deleteTick,
@@ -21,15 +22,20 @@ import {
   setActiveTool,
   setAxisSkipped,
   setBarDirection,
+  setBarSpan,
+  setBatchPick,
+  setScatterRadius,
   setChartType,
   setDebugOverlay,
   setNudgeStep,
   setPointPrefix,
   setScaleType,
   setStatus,
+  setTickScanHalf,
   setTickValue,
 } from '../state/commands'
 import {
+  axisIssue,
   axisMapping,
   axisPhase,
   canSkipAxis,
@@ -41,7 +47,7 @@ import {
 import { workerFitTicks, WorkerRequestError } from '../worker/workerClient'
 import type { TickFitDiagnostics } from '../engine/tickFitter'
 import { defaultExportForm, runExport, runSaveProject, type ExportForm } from '../io/exporter'
-import PdfGallery from './PdfGallery'
+import { PdfSessionBlock } from './PdfDialog'
 
 const AXIS_LABEL: Record<AxisId, string> = { x: 'X', y: 'Y' }
 
@@ -61,6 +67,7 @@ const PHASE_BADGE: Record<AxisPhase, { text: string; cls: string }> = {
   needTicks: { text: '缺刻度', cls: 'badge-warn' },
   pendingFit: { text: '待拟合', cls: 'badge-warn' },
   needValues: { text: '缺刻度值', cls: 'badge-warn' },
+  invalid: { text: '校准无效', cls: 'badge-warn' },
   calibrated: { text: '已校准 ✓', cls: 'badge-ok' },
 }
 
@@ -159,14 +166,15 @@ function TickRow({ axis, tick, index }: { axis: AxisId; tick: Tick; index: numbe
         }}
       />
       <button
-        className="tick-del"
-        title="删除刻度"
+        className="btn-del"
+        title="删除这个刻度（选中后也可按 Delete）"
+        data-testid={`tick-delete-${axis}-${index}`}
         onClick={(e) => {
           e.stopPropagation()
           deleteTick(axis, tick.id)
         }}
       >
-        ×
+        删除
       </button>
     </div>
   )
@@ -193,6 +201,28 @@ function FitButton({ axis }: { axis: AxisId }) {
   )
 }
 
+function ScanHalfField({ axis }: { axis: AxisId }) {
+  const half = useStore((s) => s.ui.tickScanHalf[axis])
+  return (
+    <label
+      className="insp-field"
+      title="拟合时沿轴方向的搜索半径。窗口内出现多根刻度（如次刻度、标注文字）时调小"
+    >
+      <span>扫描窗口 ±px</span>
+      <input
+        className="tick-value"
+        type="number"
+        min={2}
+        max={60}
+        step={1}
+        value={half}
+        data-testid={`scan-half-${axis}`}
+        onChange={(e) => setTickScanHalf(axis, e.target.valueAsNumber)}
+      />
+    </label>
+  )
+}
+
 /** 拟合流程（§4.3）：全部成功才应用（空心→实心）；失败内联错误 + 诊断叠加（铁律 5） */
 async function runFit(axis: AxisId): Promise<void> {
   const s = useStore.getState()
@@ -203,6 +233,7 @@ async function runFit(axis: AxisId): Promise<void> {
     const r = await workerFitTicks(
       axis,
       cal.ticks.map((t) => ({ id: t.id, at: t.at })),
+      s.ui.tickScanHalf[axis],
     )
     applyTickFit(axis, r.fitted)
     setDebugOverlay(null)
@@ -211,7 +242,11 @@ async function runFit(axis: AxisId): Promise<void> {
     const diag =
       err instanceof WorkerRequestError ? (err.diagnostics as TickFitDiagnostics | undefined) : undefined
     if (diag) {
-      setDebugOverlay({ scanBands: diag.scanBands, candidateLines: diag.candidateLines })
+      setDebugOverlay({
+        scanBands: diag.scanBands,
+        candidateLines: diag.candidateLines,
+        samplePoints: diag.samplePoints,
+      })
     }
     setStatus(err instanceof Error ? err.message : String(err))
   }
@@ -228,6 +263,7 @@ function AxisBlock({ axis }: { axis: AxisId }) {
   void otherSkipped
   const phase = axisPhase(cal)
   const mapping = axisMapping(cal)
+  const issue = axisIssue(cal)
   const skipGate = canSkipAxis(useStore.getState().model, axis)
 
   return (
@@ -236,6 +272,20 @@ function AxisBlock({ axis }: { axis: AxisId }) {
         <span className="axis-title">{label} 轴</span>
         <span className={`badge ${PHASE_BADGE[phase].cls}`}>{PHASE_BADGE[phase].text}</span>
       </div>
+
+      {cal.axisLine !== null && (
+        <div className="insp-field">
+          <span title="拟合后的轴线位置（图像像素）">轴线 {Math.round(cal.axisLine)}px</span>
+          <button
+            className="btn-del"
+            title="删除轴线，连带清除该轴刻度与刻度值；已取点保留（画轴工具下单击轴线选中后也可按 Delete）"
+            data-testid={`axis-delete-${axis}`}
+            onClick={() => deleteAxisLine(axis)}
+          >
+            删除轴线
+          </button>
+        </div>
+      )}
 
       <label className="insp-field">
         <span>刻度类型</span>
@@ -272,7 +322,13 @@ function AxisBlock({ axis }: { axis: AxisId }) {
               <div className="tick-hint">用「标 {label} 刻度」工具在刻度线处点击（{cal.ticks.length}/2）</div>
             )}
           </div>
+          <ScanHalfField axis={axis} />
           <FitButton axis={axis} />
+          {issue && (
+            <div className="axis-issue" data-testid={`axis-issue-${axis}`}>
+              {issue}
+            </div>
+          )}
         </>
       )}
 
@@ -356,10 +412,58 @@ function PointRow({ sr, index }: { sr: Series; index: number }) {
   )
 }
 
+const CHART_TYPE_LABEL: Record<ChartType, string> = {
+  scatter: '散点',
+  bar: '柱状',
+  manual: '手动',
+}
+
+const CHART_TYPE_TITLE: Record<ChartType, string> = {
+  scatter: '确认时按颜色分割出点击附近的标记，吸附到它的重心（搜索范围可调）',
+  bar: '确认时从点击处沿扫描方向寻找柱边缘',
+  manual: '按点击位置原样提交，不做吸附',
+}
+
+function NewSeriesPicker() {
+  const [open, setOpen] = useState(false)
+  if (!open) {
+    return (
+      <button className="btn-ghost" data-testid="add-series" onClick={() => setOpen(true)}>
+        + 新建序列
+      </button>
+    )
+  }
+  return (
+    <div className="insp-field" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+      <span>选择图表类型：</span>
+      <div className="new-series-types">
+        {(['scatter', 'bar', 'manual'] as const).map((t) => (
+          <button
+            key={t}
+            className="btn-ghost"
+            title={CHART_TYPE_TITLE[t]}
+            data-testid={`new-series-${t}`}
+            onClick={() => {
+              addSeries(t)
+              setOpen(false)
+            }}
+          >
+            {CHART_TYPE_LABEL[t]}
+          </button>
+        ))}
+      </div>
+      <button className="btn-ghost" onClick={() => setOpen(false)}>
+        取消
+      </button>
+    </div>
+  )
+}
+
 function ExtractBlock() {
   const series = useStore((s) => s.model.series)
   const activeId = useStore((s) => s.model.activeSeriesId)
-  const pending = useStore((s) => s.ui.pendingMarker !== null)
+  const pending = useStore((s) => s.ui.pendingMarkers.length)
+  const batchPick = useStore((s) => s.ui.batchPick)
   const nudgeStep = useStore((s) => s.ui.nudgeStep)
   const active = series.find((x) => x.id === activeId) ?? null
 
@@ -373,13 +477,11 @@ function ExtractBlock() {
       </div>
 
       <div className="series-list">
-        {series.length === 0 && <div className="tick-hint">新建一个序列开始取点</div>}
+        {series.length === 0 && <div className="tick-hint">先新建序列并选择图表类型，才能取点</div>}
         {series.map((sr, i) => (
           <SeriesRow key={sr.id} sr={sr} index={i} active={sr.id === activeId} />
         ))}
-        <button className="btn-ghost" data-testid="add-series" onClick={() => addSeries()}>
-          + 新建序列
-        </button>
+        <NewSeriesPicker />
       </div>
 
       {active && (
@@ -391,25 +493,58 @@ function ExtractBlock() {
               data-testid="chart-type"
               onChange={(e) => setChartType(active.id, e.target.value as ChartType)}
             >
-              <option value="scatter">散点/折线</option>
+              <option value="scatter">散点</option>
               <option value="bar">柱状</option>
               <option value="manual">手动（不 refine）</option>
             </select>
           </label>
-          {active.chartType === 'bar' && (
-            <label className="insp-field">
-              <span>扫描方向</span>
-              <select
-                value={active.barDirection}
-                data-testid="bar-direction"
-                onChange={(e) => setBarDirection(active.id, e.target.value as BarScanDirection)}
-              >
-                <option value="down">向下（点在柱顶上方）</option>
-                <option value="up">向上（点在柱底下方）</option>
-                <option value="left">向左（点在柱右端右侧）</option>
-                <option value="right">向右（点在柱左端左侧）</option>
-              </select>
+          {active.chartType === 'scatter' && (
+            <label
+              className="insp-field"
+              title="确认时在橙色方框内找离点击最近的标记（标记碰到方框即可，可以比方框大），按颜色分割出整个标记后取重心；框内有多个标记时取离点击最近的；确认后吸附所用的像素轮廓以绿色显示"
+            >
+              <span>搜索半径 px</span>
+              <input
+                className="tick-value"
+                type="number"
+                min={1}
+                max={60}
+                step={1}
+                value={active.scatterRadius}
+                data-testid="scatter-radius"
+                onChange={(e) => setScatterRadius(active.id, e.target.valueAsNumber)}
+              />
             </label>
+          )}
+          {active.chartType === 'bar' && (
+            <>
+              <label className="insp-field">
+                <span>扫描方向</span>
+                <select
+                  value={active.barDirection}
+                  data-testid="bar-direction"
+                  onChange={(e) => setBarDirection(active.id, e.target.value as BarScanDirection)}
+                >
+                  <option value="down">向下（点在柱顶上方）</option>
+                  <option value="up">向上（点在柱底下方）</option>
+                  <option value="left">向左（点在柱右端右侧）</option>
+                  <option value="right">向右（点在柱左端左侧）</option>
+                </select>
+              </label>
+              <label className="insp-field" title="从点击处沿扫描方向搜索柱边缘的距离（图像像素）；画布上橙色条带即扫描范围">
+                <span>扫描范围 px</span>
+                <input
+                  className="tick-value"
+                  type="number"
+                  min={5}
+                  max={500}
+                  step={5}
+                  value={active.barSpan}
+                  data-testid="bar-span"
+                  onChange={(e) => setBarSpan(active.id, e.target.valueAsNumber)}
+                />
+              </label>
+            </>
           )}
 
           {active.points.length > 0 && (
@@ -423,13 +558,33 @@ function ExtractBlock() {
       )}
 
       <button
+        className={batchPick ? 'btn-ghost btn-toggle on' : 'btn-ghost btn-toggle'}
+        aria-pressed={batchPick}
+        title={
+          batchPick
+            ? '批量取点已开启：连续点击放置多个标记，确认一次全部拟合；再点关闭'
+            : '开启后连续点击放置多个标记（例如每根柱子一个），确认一次全部拟合'
+        }
+        data-testid="batch-pick"
+        onClick={() => setBatchPick(!batchPick)}
+      >
+        批量取点{batchPick ? '：开' : '：关'}
+      </button>
+
+      <button
         className="btn-primary"
-        disabled={!pending}
-        title={pending ? '提交当前标记并自动进入下一个（Enter）' : '先在画布上点击放置标记'}
+        disabled={pending === 0}
+        title={
+          pending === 0
+            ? '先在画布上点击放置标记'
+            : pending === 1
+              ? '提交当前标记并自动进入下一个（Enter）'
+              : `按放置顺序提交全部 ${pending} 个标记（Enter）；Delete 撤掉最后一个，Esc 全部取消`
+        }
         data-testid="confirm-marker"
         onClick={() => void confirmMarkerRefined()}
       >
-        确认点（Enter）
+        {pending > 1 ? `确认 ${pending} 个点（Enter）` : '确认点（Enter）'}
       </button>
 
       <label className="insp-field" title="方向键移动选中点的步进（Shift ×10）">
@@ -587,8 +742,7 @@ export default function Inspector() {
       <AxisBlock axis="y" />
       <div className="insp-section-title">数据提取</div>
       <ExtractBlock />
-      <div className="insp-section-title">PDF</div>
-      <PdfGallery />
+      <PdfSessionBlock />
       <div className="insp-section-title">导出</div>
       <ExportBlock />
     </aside>

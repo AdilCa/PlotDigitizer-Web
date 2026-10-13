@@ -12,7 +12,7 @@ export interface MappingParams {
 
 /**
  * 由两个（刻度位置, 刻度值）对解析求解映射参数。
- * 返回 null 的退化情形：两刻度同位置；log 轴刻度值 ≤0（命令层已内联拦截，此处防御）。
+ * 返回 null 的退化情形：两刻度同位置；两刻度值相同；log 轴刻度值 ≤0。
  */
 export function solveMapping(
   p1: number,
@@ -21,7 +21,7 @@ export function solveMapping(
   v2: number,
   scaleType: ScaleType,
 ): MappingParams | null {
-  if (p1 === p2) return null
+  if (p1 === p2 || v1 === v2) return null
   if (scaleType === 'log') {
     if (v1 <= 0 || v2 <= 0) return null
     const lv1 = Math.log10(v1)

@@ -29,7 +29,7 @@ describe('buildScene 性能（M1 门禁：4000×3000 操作 >40fps 的 CPU 侧�
     }
     // 1000 个已确认点（8 序列）
     for (let s = 0; s < 8; s++) {
-      cmd.addSeries(`S${s}`)
+      cmd.addSeries('scatter', `S${s}`)
       for (let i = 0; i < 125; i++) {
         cmd.setPendingMarker({ x: 400 + i * 25, y: 400 + s * 100 })
         cmd.confirmMarker()

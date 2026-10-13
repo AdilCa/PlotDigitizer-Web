@@ -11,6 +11,7 @@ import {
   type ToolId,
 } from './model'
 import { identityViewport, type Viewport } from '../render/viewport'
+import { TICK_FITTER_DEFAULTS } from '../engine/tickFitter'
 
 export type { Viewport }
 
@@ -23,7 +24,7 @@ export interface DebugOverlay {
   scanBands?: { x: number; y: number; w: number; h: number }[]
   /** 候选线（拟合失败时），warning 色 */
   candidateLines?: { axis: AxisId; pos: number }[]
-  /** AxisFitter 全部采样点位置（中位数不剔点，无内外点之分），ink 色 */
+  /** AxisFitter 全部采样点 / TickFitter 逐行定位点，ink 色 */
   samplePoints?: PixelPoint[]
   inliers?: PixelPoint[]
   outliers?: PixelPoint[]
@@ -41,10 +42,18 @@ export interface CropBox {
 export interface UiState {
   activeTool: ToolId
   viewport: Viewport
-  /** 未确认的当前标记（Confirm 后转为 SeriesPoint 进入 model） */
-  pendingMarker: PixelPoint | null
+  /** 未确认的标记，按点击顺序（Confirm 一次全部 refine 并按此顺序编号进入 model） */
+  pendingMarkers: PixelPoint[]
+  /** 批量取点：点击空白追加标记；关闭时点击空白替换为单个标记 */
+  batchPick: boolean
+  /** 最近一次 Confirm 的散点吸附轮廓（凸包）；点被移动或删除后不再显示 */
+  refineOutlines: { pointId: string; at: PixelPoint; outline: PixelPoint[] }[]
   selectedPointId: string | null
   selectedTickId: string | null
+  /** 画轴工具下短按选中的轴线（Delete 删除，§6.2） */
+  selectedAxis: AxisId | null
+  /** 刻度拟合沿轴方向的扫描半宽（px，按轴；窗口内含多根刻度时调小，§4.3） */
+  tickScanHalf: Record<AxisId, number>
   /** 状态栏一句话提示 / 内联错误（铁律 4/5） */
   statusMessage: string | null
   /** Fit 诊断叠加（engine 产出，渲染层原样绘制；铁律 5） */
@@ -59,21 +68,27 @@ export interface UiState {
   hoverImage: PixelPoint | null
   /** 待确认的新文件导入名（§6.6 加载重置预告；File 本体在 io/fileAccess 模块态） */
   pendingImportName: string | null
-  /** PDF 会话图库（§5.5；文档句柄在 pdf/pdfSession 模块态保活，store 只放缩略图元信息） */
+  /** PDF 会话图库（§5.5；文档句柄在 pdf/pdfSession 模块态保活，store 只放缩略图元信息；换图不清除） */
   pdfGallery: {
     fileName: string
     pageCount: number
+    /** 逐页渲染，按页序到达（长度 < pageCount 表示仍在生成） */
     thumbs: {
       page: number
       dataUrl: string
       width: number
       height: number
-      pageWidth: number
-      pageHeight: number
+      /** 页面尺寸（pt） */
+      widthPt: number
+      heightPt: number
     }[]
   } | null
+  /** PDF 选页弹窗是否打开 */
+  pdfDialogOpen: boolean
   /** 已有校准时裁剪需二次确认（铁律 3 预告；首次确认后置位） */
   cropArmed: boolean
+  /** 裁剪请求在途：期间禁止再次执行与编辑选框 */
+  cropBusy: boolean
 }
 
 export interface AppState {
@@ -85,9 +100,13 @@ export function createFreshUi(): UiState {
   return {
     activeTool: 'drawXAxis',
     viewport: identityViewport(),
-    pendingMarker: null,
+    pendingMarkers: [],
+    batchPick: false,
+    refineOutlines: [],
     selectedPointId: null,
     selectedTickId: null,
+    selectedAxis: null,
+    tickScanHalf: { x: TICK_FITTER_DEFAULTS.scanHalf, y: TICK_FITTER_DEFAULTS.scanHalf },
     statusMessage: null,
     debugOverlay: null,
     cropBox: null,
@@ -96,7 +115,9 @@ export function createFreshUi(): UiState {
     hoverImage: null,
     pendingImportName: null,
     pdfGallery: null,
+    pdfDialogOpen: false,
     cropArmed: false,
+    cropBusy: false,
   }
 }
 

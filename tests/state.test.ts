@@ -3,11 +3,15 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { useStore, createFreshUi } from '../src/state/store'
 import { createEmptyModel, type ImageRef } from '../src/state/model'
 import {
+  axisIssue,
   axisMapping,
+  axisPhase,
   axisStatus,
   axisValueAt,
   dataPointsOf,
   gateFor,
+  isAxisCalibrated,
+  nextActionHint,
   toolEnabled,
 } from '../src/state/selectors'
 import * as cmd from '../src/state/commands'
@@ -57,7 +61,7 @@ describe('轴四态（§6.2）', () => {
   it('重画轴级联删除刻度，已取点保留', () => {
     cmd.loadImage(IMG)
     calibrateX()
-    const sid = cmd.addSeries('A')
+    const sid = cmd.addSeries('scatter', 'A')
     cmd.setPendingMarker({ x: 150, y: 300 })
     cmd.confirmMarker()
     cmd.setAxisLine('x', 480) // 重画
@@ -114,7 +118,7 @@ describe('铁律 2：派生数据级联重算与缓存', () => {
   it('校准变更 → 数据坐标自动更新', () => {
     cmd.loadImage(IMG)
     const { t2 } = calibrateX()
-    cmd.addSeries('A')
+    cmd.addSeries('scatter', 'A')
     cmd.setPendingMarker({ x: 150, y: 300 })
     const pid = cmd.confirmMarker()!
     const sid = state().model.activeSeriesId!
@@ -131,7 +135,7 @@ describe('铁律 2：派生数据级联重算与缓存', () => {
   it('输入分支未变时返回缓存引用；变更后失效', () => {
     cmd.loadImage(IMG)
     calibrateX()
-    cmd.addSeries('A')
+    cmd.addSeries('scatter', 'A')
     cmd.setPendingMarker({ x: 150, y: 300 })
     cmd.confirmMarker()
     const sid = state().model.activeSeriesId!
@@ -153,7 +157,7 @@ describe('铁律 2：派生数据级联重算与缓存', () => {
     cmd.loadImage(IMG)
     calibrateX()
     cmd.setAxisSkipped('y', true)
-    cmd.addSeries('A')
+    cmd.addSeries('scatter', 'A')
     cmd.setPendingMarker({ x: 150, y: 300 })
     cmd.confirmMarker()
     const dp = dataPointsOf(state().model, state().model.activeSeriesId!)
@@ -180,12 +184,17 @@ describe('门控（§6.1，唯一校验源）', () => {
     expect(gateFor(state(), 'fitTickX').enabled).toBe(true) // 2 个待拟合
   })
 
-  it('取点/导出需 ≥1 轴已校准；刻度上限为 2', () => {
+  it('取点需 ≥1 轴已校准 + 当前序列；导出只需校准；刻度上限为 2', () => {
     cmd.loadImage(IMG)
     expect(gateFor(state(), 'extractMarker').enabled).toBe(false)
     calibrateX()
-    expect(gateFor(state(), 'extractMarker').enabled).toBe(true)
+    const g = gateFor(state(), 'extractMarker')
+    expect(g.enabled).toBe(false)
+    if (!g.enabled) expect(g.reason).toContain('新建序列')
     expect(gateFor(state(), 'export').enabled).toBe(true)
+    cmd.addSeries('bar', 'A')
+    expect(gateFor(state(), 'extractMarker').enabled).toBe(true)
+    expect(state().model.series[0]).toMatchObject({ chartType: 'bar', barSpan: 40 })
     expect(cmd.addTick('x', { x: 300, y: 500 })).toBeNull() // 第 3 个被拒绝
     expect(state().ui.statusMessage).toContain('恰好 2 个刻度')
   })
@@ -199,11 +208,110 @@ describe('门控（§6.1，唯一校验源）', () => {
   })
 })
 
+describe('退化校准：已校准 = 映射可解', () => {
+  it('两刻度值相同 → 不算已校准，phase=invalid 并给出原因，取点不可用', () => {
+    cmd.loadImage(IMG)
+    const { t2 } = calibrateX()
+    cmd.setTickValue('x', t2, 0)
+    const cal = state().model.calibration.x
+    expect(isAxisCalibrated(cal)).toBe(false)
+    expect(axisPhase(cal)).toBe('invalid')
+    expect(axisIssue(cal)).toContain('刻度值相同')
+    expect(axisMapping(cal)).toBeNull()
+    expect(gateFor(state(), 'export').enabled).toBe(false)
+    expect(nextActionHint(state())).toContain('X 轴校准无效')
+  })
+
+  it('两刻度拟合到同一位置 → invalid', () => {
+    cmd.loadImage(IMG)
+    cmd.setAxisLine('x', 500)
+    const t1 = cmd.addTick('x', { x: 100, y: 510 })!
+    const t2 = cmd.addTick('x', { x: 104, y: 510 })!
+    cmd.applyTickFit('x', { [t1]: 101.5, [t2]: 101.5 })
+    cmd.setTickValue('x', t1, 0)
+    cmd.setTickValue('x', t2, 10)
+    expect(axisPhase(state().model.calibration.x)).toBe('invalid')
+    expect(axisIssue(state().model.calibration.x)).toContain('同一位置')
+  })
+
+  it('切换刻度类型清空两个刻度值（先填 0/100 再切对数不会留下非法值）', () => {
+    cmd.loadImage(IMG)
+    calibrateX()
+    cmd.setScaleType('x', 'log')
+    const cal = state().model.calibration.x
+    expect(cal.ticks.map((t) => t.value)).toEqual([null, null])
+    expect(cal.ticks.every((t) => t.fittedPos !== null)).toBe(true) // 位置与拟合保留
+    expect(axisPhase(cal)).toBe('needValues')
+    expect(state().ui.statusMessage).toContain('重新输入')
+  })
+})
+
+describe('删除轴线 / 选中轴线', () => {
+  it('删除轴线连带清除刻度与刻度值，已取点保留', () => {
+    cmd.loadImage(IMG)
+    calibrateX()
+    cmd.addSeries('scatter', 'A')
+    cmd.setPendingMarker({ x: 150, y: 300 })
+    cmd.confirmMarker()
+    cmd.selectAxis('x')
+    cmd.deleteAxisLine('x')
+    const m = state().model
+    expect(m.calibration.x.axisLine).toBeNull()
+    expect(m.calibration.x.ticks).toHaveLength(0)
+    expect(axisStatus(m.calibration.x)).toBe('unset')
+    expect(m.series[0].points).toHaveLength(1)
+    expect(state().ui.selectedAxis).toBeNull()
+  })
+
+  it('切换工具清除轴线选中', () => {
+    cmd.loadImage(IMG)
+    cmd.setAxisLine('x', 500)
+    cmd.selectAxis('x')
+    cmd.setActiveTool('markTickX')
+    expect(state().ui.selectedAxis).toBeNull()
+  })
+})
+
+describe('工具门控失效自动回退', () => {
+  it('删除最后一个序列 → 取点工具退回画轴', () => {
+    cmd.loadImage(IMG)
+    calibrateX()
+    const sid = cmd.addSeries('scatter', 'A')
+    cmd.setActiveTool('extractMarker')
+    cmd.setPendingMarker({ x: 1, y: 1 })
+    cmd.deleteSeries(sid)
+    expect(state().ui.activeTool).toBe('drawXAxis')
+    expect(state().ui.pendingMarkers).toEqual([])
+  })
+
+  it('标 Y 刻度时跳过 Y 轴 → 退回画 Y 轴；换图后取点工具不再停留', () => {
+    cmd.loadImage(IMG)
+    cmd.setAxisLine('y', 300)
+    cmd.setActiveTool('markTickY')
+    cmd.setAxisSkipped('y', true)
+    expect(state().ui.activeTool).toBe('drawYAxis')
+
+    calibrateX()
+    cmd.setAxisSkipped('y', false)
+    cmd.addSeries('scatter', 'A')
+    cmd.setActiveTool('extractMarker')
+    cmd.loadImage({ ...IMG, name: 'test2.png' })
+    expect(state().ui.activeTool).toBe('drawXAxis')
+  })
+
+  it('扫描窗口按轴设置，取整并钳制', () => {
+    expect(state().ui.tickScanHalf).toEqual({ x: 10, y: 10 })
+    cmd.setTickScanHalf('x', 6.4)
+    cmd.setTickScanHalf('y', 999)
+    expect(state().ui.tickScanHalf).toEqual({ x: 6, y: 60 })
+  })
+})
+
 describe('取点语义（§6.3 / §6.5）', () => {
   it('Confirm 自动编号（前缀+序号），序号不复用', () => {
     cmd.loadImage(IMG)
     calibrateX()
-    cmd.addSeries('A')
+    cmd.addSeries('scatter', 'A')
     cmd.setPendingMarker({ x: 150, y: 300 })
     const p1 = cmd.confirmMarker()!
     cmd.setPendingMarker({ x: 160, y: 300 })
@@ -218,6 +326,40 @@ describe('取点语义（§6.3 / §6.5）', () => {
     expect(pts.map((p) => p.name)).toEqual(['A2', 'A3']) // 不复用 A1
   })
 
+  it('改前缀：自动命名的已有点跟着改，手动改过名的点不变，之后的新点用新前缀', () => {
+    cmd.loadImage(IMG)
+    calibrateX()
+    const sid = cmd.addSeries('scatter', 'A')
+    for (const x of [150, 160, 170]) {
+      cmd.setPendingMarker({ x, y: 300 })
+      cmd.confirmMarker()
+    }
+    const pts = () => state().model.series[0].points.map((p) => p.name)
+    cmd.renamePoint(state().model.series[0].points[1].id, '峰值')
+    cmd.setPointPrefix(sid, 'B')
+    expect(pts()).toEqual(['B1', '峰值', 'B3'])
+    cmd.setPointPrefix(sid, '') // 逐字删空再输入，中间态不丢序号
+    cmd.setPointPrefix(sid, 'C')
+    expect(pts()).toEqual(['C1', '峰值', 'C3'])
+    cmd.setPendingMarker({ x: 180, y: 300 })
+    cmd.confirmMarker()
+    expect(pts()).toEqual(['C1', '峰值', 'C3', 'C4'])
+  })
+
+  it('改序列名：前缀仍是默认值时跟着改；单独设过前缀后不再跟随', () => {
+    cmd.loadImage(IMG)
+    calibrateX()
+    const sid = cmd.addSeries('scatter', 'A')
+    cmd.setPendingMarker({ x: 150, y: 300 })
+    cmd.confirmMarker()
+    cmd.renameSeries(sid, '组A')
+    expect(state().model.series[0]).toMatchObject({ pointPrefix: '组A' })
+    expect(state().model.series[0].points[0].name).toBe('组A1')
+    cmd.setPointPrefix(sid, 'P')
+    cmd.renameSeries(sid, '组B')
+    expect(state().model.series[0].points[0].name).toBe('P1')
+  })
+
   it('无活动序列时 Confirm 为 no-op + 状态栏提示（F6.3）', () => {
     cmd.loadImage(IMG)
     calibrateX()
@@ -230,7 +372,7 @@ describe('取点语义（§6.3 / §6.5）', () => {
   it('方向键步进移动 + 级联重算', () => {
     cmd.loadImage(IMG)
     calibrateX()
-    cmd.addSeries('A')
+    cmd.addSeries('scatter', 'A')
     cmd.setPendingMarker({ x: 150, y: 300 })
     const pid = cmd.confirmMarker()!
     cmd.movePointBy(pid, 10, 0) // Shift 粗调由 UI 层换算步进
@@ -240,8 +382,8 @@ describe('取点语义（§6.3 / §6.5）', () => {
 
   it('删除序列后活动序列转移', () => {
     cmd.loadImage(IMG)
-    const s1 = cmd.addSeries('A')
-    const s2 = cmd.addSeries('B')
+    const s1 = cmd.addSeries('scatter', 'A')
+    const s2 = cmd.addSeries('scatter', 'B')
     expect(state().model.activeSeriesId).toBe(s2)
     cmd.deleteSeries(s2)
     expect(state().model.activeSeriesId).toBe(s1)
@@ -254,7 +396,7 @@ describe('换图全量重置（§6.6、F3.4）', () => {
   it('loadImage 清空校准与取点，无旧数据残留', () => {
     cmd.loadImage(IMG)
     calibrateX()
-    cmd.addSeries('A')
+    cmd.addSeries('scatter', 'A')
     cmd.setPendingMarker({ x: 150, y: 300 })
     cmd.confirmMarker()
 
@@ -263,13 +405,13 @@ describe('换图全量重置（§6.6、F3.4）', () => {
     expect(m.image!.name).toBe('test2.png')
     expect(m.calibration.x.axisLine).toBeNull()
     expect(m.series).toHaveLength(0)
-    expect(state().ui.pendingMarker).toBeNull()
+    expect(state().ui.pendingMarkers).toEqual([])
   })
 
   it('裁剪确认（resetModelKeepingImage）保留图像元信息、清空校准与点', () => {
     cmd.loadImage(IMG)
     calibrateX()
-    cmd.addSeries('A')
+    cmd.addSeries('scatter', 'A')
     cmd.resetModelKeepingImage({ width: 1000, height: 750 })
     const m = state().model
     expect(m.image).toMatchObject({ name: 'test1.png', width: 1000, height: 750 })

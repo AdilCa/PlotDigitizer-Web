@@ -32,8 +32,8 @@ export interface PixelPoint {
 /**
  * 刻度（§4.3 两点制）。
  * pos：当前沿轴位置（图像像素；X 轴取 x，Y 轴取 y）。
- * at：用户点击的完整位置——拟合剖面在该点取样（垂直分量决定剖面行/列，
- *     避开轴线本身的干扰，§4.3）；拖动时刻 at 跟随指针。
+ * at：用户点击的完整位置——拟合从这一行（列）开始逐行扫描（§4.3）；
+ *     未拟合时刻度就画在 at，拟合后画在轴线上的投影 (pos, axisLine)。
  * fittedPos：拟合吸附后的精确位置；pos !== fittedPos → 派生「待拟合」，
  *            因此移动刻度后自动回到待拟合态、刻度值保留（§6.2），无需额外状态位。
  */
@@ -68,6 +68,10 @@ export interface Series {
   name: string
   chartType: ChartType
   barDirection: BarScanDirection
+  /** 柱状序列沿扫描方向的搜索范围（px，§4.4） */
+  barSpan: number
+  /** 散点序列的吸附窗口半径（px，窗口 (2r+1)²，§4.4）；调到刚好框住一个标记，网格/文字不进窗口 */
+  scatterRadius: number
   /** 点命名前缀，默认取序列名（§7.2） */
   pointPrefix: string
   points: SeriesPoint[]
@@ -103,12 +107,17 @@ export function createAxisCalibration(): AxisCalibration {
   return { skipped: false, axisLine: null, ticks: [], scaleType: 'linear' }
 }
 
-export function createSeries(name: string, chartType: ChartType = 'scatter'): Series {
+export const DEFAULT_BAR_SPAN = 40
+export const DEFAULT_SCATTER_RADIUS = 8
+
+export function createSeries(name: string, chartType: ChartType): Series {
   return {
     id: newId(),
     name,
     chartType,
     barDirection: 'down',
+    barSpan: DEFAULT_BAR_SPAN,
+    scatterRadius: DEFAULT_SCATTER_RADIUS,
     pointPrefix: name,
     points: [],
     nextPointSeq: 1,

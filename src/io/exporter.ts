@@ -34,7 +34,7 @@ export function annotatedName(mdBase: string): string {
 export async function produceExport(form: ExportForm): Promise<{ md: Blob; png: Blob; pngName: string }> {
   const { model } = useStore.getState()
   const markers = model.series.flatMap((s, i) =>
-    s.points.map((p) => ({ x: p.pixel.x, y: p.pixel.y, color: SERIES_COLORS[i % SERIES_COLORS.length] })),
+    s.points.map((p) => ({ x: p.pixel.x, y: p.pixel.y, color: SERIES_COLORS[i % SERIES_COLORS.length], name: p.name })),
   )
   const pngBytes = await workerRenderAnnotated(markers)
   const pngName = `${annotatedName(form.fileName)}.png`

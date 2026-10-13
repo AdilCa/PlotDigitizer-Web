@@ -2,9 +2,12 @@ import { useEffect, useRef } from 'react'
 import { useStore } from './state/store'
 import {
   confirmMarkerRefined,
+  deleteAxisLine,
   deletePoint,
   deleteTick,
   movePointBy,
+  popPendingMarker,
+  selectAxis,
   selectPoint,
   selectTick,
   setActiveTool,
@@ -15,9 +18,9 @@ import { gateFor, hasWork, nextActionHint, axisValueAt, type GateOp } from './st
 import type { ToolId } from './state/model'
 import CanvasView from './ui/CanvasView'
 import Inspector from './ui/Inspector'
+import { PdfDialog } from './ui/PdfDialog'
 import { installDropZone, openFilePicker, confirmPendingImport, cancelPendingImport } from './io/fileAccess'
 import { cancelCrop, executeCrop, handleCropKey } from './interact/cropTool'
-import { dropGrabbed, isGrabbing } from './interact/markerTool'
 
 const TOOLS: { id: ToolId; gate: GateOp; label: string }[] = [
   { id: 'drawXAxis', gate: 'drawXAxis', label: '画 X 轴' },
@@ -36,11 +39,12 @@ function ToolButton({ id, gate, label }: { id: ToolId; gate: GateOp; label: stri
     return g.enabled ? null : g.reason
   })
   const active = useStore((s) => s.ui.activeTool === id)
+  const cropBusy = useStore((s) => s.ui.cropBusy)
   return (
     <button
       className={`tool-btn${active ? ' active' : ''}`}
-      disabled={!enabled}
-      title={reason ?? label}
+      disabled={!enabled || cropBusy}
+      title={cropBusy ? '正在裁剪…' : (reason ?? label)}
       onClick={() => setActiveTool(id)}
     >
       {label}
@@ -52,15 +56,21 @@ function ToolButton({ id, gate, label }: { id: ToolId; gate: GateOp; label: stri
 function CropBar() {
   const visible = useStore((s) => s.ui.activeTool === 'imageEdit' && s.ui.cropBox !== null)
   const armed = useStore((s) => s.ui.cropArmed)
+  const busy = useStore((s) => s.ui.cropBusy)
   const work = useStore((s) => hasWork(s.model))
   if (!visible) return null
   return (
     <div className="crop-bar">
       {work && !armed && <span className="crop-warning">⚠ 裁剪将清除当前校准与已取点</span>}
-      <button className={work && !armed ? 'btn-warning' : 'btn-primary'} onClick={() => void executeCrop()}>
-        {work && !armed ? '仍要裁剪' : '确认裁剪'}（Enter）
+      <button
+        className={work && !armed ? 'btn-warning' : 'btn-primary'}
+        disabled={busy}
+        data-testid="crop-confirm"
+        onClick={() => void executeCrop()}
+      >
+        {busy ? '正在裁剪…' : `${work && !armed ? '仍要裁剪' : '确认裁剪'}（Enter）`}
       </button>
-      <button className="btn-ghost" onClick={cancelCrop}>
+      <button className="btn-ghost" disabled={busy} onClick={cancelCrop}>
         取消（Esc）
       </button>
     </div>
@@ -116,6 +126,7 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (useStore.getState().ui.pdfDialogOpen) return // 选页弹窗独占键盘
       if (handleCropKey(e)) {
         e.preventDefault()
         return
@@ -128,22 +139,22 @@ export default function App() {
 
       const s = useStore.getState()
 
-      // Enter：抓起态放下；取点工具下 Confirm 提交（§6.3）
+      // Enter：取点工具下 Confirm 提交（§6.3）；按住不放的自动重复不重复提交
       if (e.key === 'Enter') {
-        if (isGrabbing()) {
-          dropGrabbed()
-          e.preventDefault()
-          return
-        }
-        if (s.ui.activeTool === 'extractMarker' && s.ui.pendingMarker) {
-          void confirmMarkerRefined()
+        if (s.ui.activeTool === 'extractMarker' && s.ui.pendingMarkers.length > 0) {
+          if (!e.repeat) void confirmMarkerRefined()
           e.preventDefault()
           return
         }
       }
 
-      // Delete：删除选中的点或刻度；取点工具下无选中时删最后一个已确认标记（§3 状态表）
+      // Delete：删除选中的轴线、点或刻度；取点工具下无选中时删最后一个已确认标记（§3 状态表）
       if (e.key === 'Delete') {
+        if (s.ui.selectedAxis) {
+          deleteAxisLine(s.ui.selectedAxis)
+          e.preventDefault()
+          return
+        }
         if (s.ui.selectedPointId) {
           deletePoint(s.ui.selectedPointId)
           e.preventDefault()
@@ -157,6 +168,12 @@ export default function App() {
               return
             }
           }
+        }
+        if (s.ui.activeTool === 'extractMarker' && s.ui.pendingMarkers.length > 0) {
+          popPendingMarker()
+          setStatus(`已撤掉最后一个未确认标记（剩 ${s.ui.pendingMarkers.length - 1} 个）`)
+          e.preventDefault()
+          return
         }
         if (s.ui.activeTool === 'extractMarker') {
           const active = s.model.series.find((x) => x.id === s.model.activeSeriesId)
@@ -172,15 +189,17 @@ export default function App() {
 
       // Esc：取消当前未确认标记；否则取消点/刻度选中（§3；裁剪的 Esc 已在 handleCropKey 消费）
       if (e.key === 'Escape') {
-        if (s.ui.pendingMarker) {
+        const n = s.ui.pendingMarkers.length
+        if (n > 0) {
           setPendingMarker(null)
-          setStatus('已取消当前标记')
+          setStatus(n === 1 ? '已取消当前标记' : `已取消 ${n} 个未确认标记`)
           e.preventDefault()
           return
         }
-        if (s.ui.selectedPointId || s.ui.selectedTickId) {
+        if (s.ui.selectedPointId || s.ui.selectedTickId || s.ui.selectedAxis) {
           selectPoint(null)
           selectTick(null)
+          selectAxis(null)
           e.preventDefault()
           return
         }
@@ -218,6 +237,7 @@ export default function App() {
       <Inspector />
       <CropBar />
       <ImportBar />
+      <PdfDialog />
       {!hasImage && <div className="empty-hint">拖入图片 / PDF / .pdproj 开始，或点击左侧「打开」</div>}
       <div className="status-bar">
         <span className="status-text">{status}</span>

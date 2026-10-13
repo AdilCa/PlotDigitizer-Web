@@ -1,80 +1,62 @@
 // pdfSession.ts — PDF 会话缓存（§5.5）
-// PDF.js 封装：拖入 PDF → 96 DPI 渲染整页缩略图供浏览（不产出巨大位图）；
-// 用户框选感兴趣区域后按 300 DPI 只渲染该区域，导入走 M1 双轨路径。
-// PDFDocumentProxy 句柄与各页缩略图在窗口关闭/加载新 PDF 前保活（模块态，不进 store；
-// store 只放展示用的 dataURL 缩略图元信息）。
+// PDF.js 封装：拖入 PDF → 打开选页弹窗，逐页渲染缩略图（先开窗、边渲染边出现）；
+// 选中页按需渲染大预览；导入 = 整页按所选 DPI 渲染为位图，走 M1 双轨路径。
+// 裁剪不在这里做：导入后在画布上用图像编辑工具裁剪（§6.6，裁剪唯一入口）。
+// PDFDocumentProxy 句柄在加载新 PDF 前保活（模块态，不进 store；store 只放缩略图元信息），
+// 可随时重新打开弹窗选下一页，无需重新解析。
 import * as pdfjs from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
-import { setPdfGallery, setStatus } from '../state/commands'
+import { addPdfThumb, setPdfDialogOpen, setPdfGallery, setStatus } from '../state/commands'
+import { dpiAllowed, PDF_MAX_EDGE } from './pdfImport'
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl
-
-export interface PdfPageThumb {
-  page: number // 1-based
-  dataUrl: string
-  /** 缩略图像素尺寸 */
-  width: number
-  height: number
-  /** 96 DPI 整页像素尺寸（区域框选坐标系） */
-  pageWidth: number
-  pageHeight: number
-}
 
 let doc: pdfjs.PDFDocumentProxy | null = null
 let fileName = ''
 let imageCounter = 0
 
-const DPI_BROWSE = 96
-const DPI_IMPORT = 300
-const THUMB_WIDTH = 104
+const THUMB_WIDTH = 132
 
-/** 96 DPI 页像素 → pt（PDF viewport 单位） */
-const PT_PER_PX96 = 72 / 96
-
-async function renderPage(page: pdfjs.PDFPageProxy, scale: number, region?: { x: number; y: number; w: number; h: number }): Promise<HTMLCanvasElement> {
+async function renderToCanvas(page: pdfjs.PDFPageProxy, scale: number): Promise<HTMLCanvasElement> {
   const viewport = page.getViewport({ scale })
   const canvas = document.createElement('canvas')
-  if (region) {
-    // region 以 96 DPI 页像素给出；渲染输出 = region(pt) × scale
-    canvas.width = Math.ceil(region.w * PT_PER_PX96 * scale)
-    canvas.height = Math.ceil(region.h * PT_PER_PX96 * scale)
-  } else {
-    canvas.width = Math.ceil(viewport.width)
-    canvas.height = Math.ceil(viewport.height)
-  }
+  canvas.width = Math.ceil(viewport.width)
+  canvas.height = Math.ceil(viewport.height)
   const ctx = canvas.getContext('2d')!
-  const transform = region
-    ? [scale, 0, 0, scale, -region.x * PT_PER_PX96 * scale, -region.y * PT_PER_PX96 * scale]
-    : undefined
-  await page.render({ canvasContext: ctx, viewport, transform }).promise
+  ctx.fillStyle = '#ffffff' // PDF 页面默认白底；透明底会在画布上显示成工作台灰
+  ctx.fillRect(0, 0, canvas.width, canvas.height)
+  await page.render({ canvasContext: ctx, viewport }).promise
   return canvas
 }
 
-/** 打开 PDF：枚举页面并渲染缩略图（96 DPI 浏览轨） */
+/** 打开 PDF：建立会话并打开选页弹窗，随后逐页补齐缩略图 */
 export async function openPdf(file: File): Promise<void> {
   closePdf()
   const data = new Uint8Array(await file.arrayBuffer())
-  doc = await pdfjs.getDocument({ data }).promise
+  const opened = await pdfjs.getDocument({ data }).promise
+  doc = opened
   fileName = file.name
   imageCounter = 0
+  setPdfGallery({ fileName, pageCount: opened.numPages, thumbs: [] })
+  setPdfDialogOpen(true)
+  setStatus(`PDF 已打开（${opened.numPages} 页）：选择一页导入`)
 
-  const thumbs: PdfPageThumb[] = []
-  for (let p = 1; p <= doc.numPages; p++) {
-    const page = await doc.getPage(p)
-    const browse = page.getViewport({ scale: DPI_BROWSE / 72 })
-    const canvas = await renderPage(page, THUMB_WIDTH / browse.width)
-    thumbs.push({
+  for (let p = 1; p <= opened.numPages; p++) {
+    if (doc !== opened) return // 期间换了 PDF
+    const page = await opened.getPage(p)
+    const base = page.getViewport({ scale: 1 })
+    const canvas = await renderToCanvas(page, THUMB_WIDTH / base.width)
+    page.cleanup()
+    if (doc !== opened) return
+    addPdfThumb({
       page: p,
       dataUrl: canvas.toDataURL('image/png'),
       width: canvas.width,
       height: canvas.height,
-      pageWidth: browse.width,
-      pageHeight: browse.height,
+      widthPt: base.width,
+      heightPt: base.height,
     })
-    page.cleanup()
   }
-  setPdfGallery({ fileName, pageCount: doc.numPages, thumbs })
-  setStatus(`PDF 已加载（${doc.numPages} 页）：在图库中选页并框选区域导入`)
 }
 
 export function closePdf(): void {
@@ -83,29 +65,32 @@ export function closePdf(): void {
   fileName = ''
   imageCounter = 0
   setPdfGallery(null)
+  setPdfDialogOpen(false)
 }
 
-/** 区域 300 DPI 渲染（§5.5：只渲染框选区域，避免先得到巨大位图再裁剪） */
-export async function renderRegion(
-  pageNum: number,
-  region: { x: number; y: number; w: number; h: number },
-): Promise<Blob> {
+/** 弹窗大预览：整页适配到 box（CSS 像素），按设备像素比渲染保证清晰 */
+export async function renderPreview(pageNum: number, box: { width: number; height: number }): Promise<string> {
   if (!doc) throw new Error('无 PDF 会话')
   const page = await doc.getPage(pageNum)
-  // 防御性钳制到页面范围（96 DPI 页像素坐标系）
-  const browse = page.getViewport({ scale: DPI_BROWSE / 72 })
-  const x = Math.max(0, Math.min(region.x, browse.width))
-  const y = Math.max(0, Math.min(region.y, browse.height))
-  const clamped = {
-    x,
-    y,
-    w: Math.max(1, Math.min(region.w, browse.width - x)),
-    h: Math.max(1, Math.min(region.h, browse.height - y)),
+  const base = page.getViewport({ scale: 1 })
+  const fit = Math.min(box.width / base.width, box.height / base.height)
+  const canvas = await renderToCanvas(page, fit * (window.devicePixelRatio || 1))
+  page.cleanup()
+  return canvas.toDataURL('image/png')
+}
+
+/** 整页按 DPI 渲染为 PNG（导入用） */
+export async function renderPageImage(pageNum: number, dpi: number): Promise<Blob> {
+  if (!doc) throw new Error('无 PDF 会话')
+  const page = await doc.getPage(pageNum)
+  const base = page.getViewport({ scale: 1 })
+  if (!dpiAllowed({ widthPt: base.width, heightPt: base.height }, dpi)) {
+    throw new Error(`${dpi} DPI 下长边超过 ${PDF_MAX_EDGE}px，请选更低的 DPI`)
   }
-  const canvas = await renderPage(page, DPI_IMPORT / 72, clamped)
+  const canvas = await renderToCanvas(page, dpi / 72)
   page.cleanup()
   const blob = await new Promise<Blob | null>((r) => canvas.toBlob((b) => r(b), 'image/png'))
-  if (!blob) throw new Error('区域渲染失败')
+  if (!blob) throw new Error('页面渲染失败')
   return blob
 }
 
