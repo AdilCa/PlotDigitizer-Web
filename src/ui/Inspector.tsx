@@ -26,6 +26,8 @@ import {
   setBatchPick,
   setScatterRadius,
   setChartType,
+  setCurveRadius,
+  setCurveStep,
   setDebugOverlay,
   setNudgeStep,
   setPointPrefix,
@@ -415,12 +417,14 @@ function PointRow({ sr, index }: { sr: Series; index: number }) {
 const CHART_TYPE_LABEL: Record<ChartType, string> = {
   scatter: '散点',
   bar: '柱状',
+  curve: '曲线',
   manual: '手动',
 }
 
 const CHART_TYPE_TITLE: Record<ChartType, string> = {
   scatter: '确认时按颜色分割出点击附近的标记，吸附到它的重心（搜索范围可调）',
   bar: '确认时从点击处沿扫描方向寻找柱边缘',
+  curve: '沿曲线涂抹一笔，确认时按曲线颜色沿笔迹提取一串点',
   manual: '按点击位置原样提交，不做吸附',
 }
 
@@ -437,7 +441,7 @@ function NewSeriesPicker() {
     <div className="insp-field" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
       <span>选择图表类型：</span>
       <div className="new-series-types">
-        {(['scatter', 'bar', 'manual'] as const).map((t) => (
+        {(['scatter', 'bar', 'curve', 'manual'] as const).map((t) => (
           <button
             key={t}
             className="btn-ghost"
@@ -465,7 +469,9 @@ function ExtractBlock() {
   const pending = useStore((s) => s.ui.pendingMarkers.length)
   const batchPick = useStore((s) => s.ui.batchPick)
   const nudgeStep = useStore((s) => s.ui.nudgeStep)
+  const strokeLen = useStore((s) => s.ui.curveStroke.length)
   const active = series.find((x) => x.id === activeId) ?? null
+  const curve = active?.chartType === 'curve'
 
   return (
     <div className="axis-block" data-testid="extract-block">
@@ -495,6 +501,7 @@ function ExtractBlock() {
             >
               <option value="scatter">散点</option>
               <option value="bar">柱状</option>
+              <option value="curve">曲线（涂抹提取）</option>
               <option value="manual">手动（不 refine）</option>
             </select>
           </label>
@@ -547,6 +554,43 @@ function ExtractBlock() {
             </>
           )}
 
+          {active.chartType === 'curve' && (
+            <>
+              <div className="tick-hint">
+                在画布上沿曲线按住拖动涂抹一笔（盖住线即可，不用描准），Enter 提取；在笔迹末端按下可接着涂，Esc 清除笔迹
+              </div>
+              <label
+                className="insp-field"
+                title="涂抹笔刷半径（图像像素）。只在这条带子里找曲线：盖住目标线即可，越窄越不容易蹭到旁边的线、图例和文字"
+              >
+                <span>笔刷半径 px</span>
+                <input
+                  className="tick-value"
+                  type="number"
+                  min={2}
+                  max={60}
+                  step={1}
+                  value={active.curveRadius}
+                  data-testid="curve-radius"
+                  onChange={(e) => setCurveRadius(active.id, e.target.valueAsNumber)}
+                />
+              </label>
+              <label className="insp-field" title="沿笔迹每隔多少像素取一个点（图像像素）；越小点越密">
+                <span>采样间隔 px</span>
+                <input
+                  className="tick-value"
+                  type="number"
+                  min={1}
+                  max={50}
+                  step={1}
+                  value={active.curveStep}
+                  data-testid="curve-step"
+                  onChange={(e) => setCurveStep(active.id, e.target.valueAsNumber)}
+                />
+              </label>
+            </>
+          )}
+
           {active.points.length > 0 && (
             <div className="point-list">
               {active.points.map((_, i) => (
@@ -557,35 +601,49 @@ function ExtractBlock() {
         </>
       )}
 
-      <button
-        className={batchPick ? 'btn-ghost btn-toggle on' : 'btn-ghost btn-toggle'}
-        aria-pressed={batchPick}
-        title={
-          batchPick
-            ? '批量取点已开启：连续点击放置多个标记，确认一次全部拟合；再点关闭'
-            : '开启后连续点击放置多个标记（例如每根柱子一个），确认一次全部拟合'
-        }
-        data-testid="batch-pick"
-        onClick={() => setBatchPick(!batchPick)}
-      >
-        批量取点{batchPick ? '：开' : '：关'}
-      </button>
+      {curve ? (
+        <button
+          className="btn-primary"
+          disabled={strokeLen < 2}
+          title={strokeLen < 2 ? '先在画布上沿曲线涂抹一笔' : '按曲线颜色沿笔迹提取一串点（Enter）；Esc 清除笔迹'}
+          data-testid="confirm-curve"
+          onClick={() => void confirmMarkerRefined()}
+        >
+          提取曲线（Enter）
+        </button>
+      ) : (
+        <>
+          <button
+            className={batchPick ? 'btn-ghost btn-toggle on' : 'btn-ghost btn-toggle'}
+            aria-pressed={batchPick}
+            title={
+              batchPick
+                ? '批量取点已开启：连续点击放置多个标记，确认一次全部拟合；再点关闭'
+                : '开启后连续点击放置多个标记（例如每根柱子一个），确认一次全部拟合'
+            }
+            data-testid="batch-pick"
+            onClick={() => setBatchPick(!batchPick)}
+          >
+            批量取点{batchPick ? '：开' : '：关'}
+          </button>
 
-      <button
-        className="btn-primary"
-        disabled={pending === 0}
-        title={
-          pending === 0
-            ? '先在画布上点击放置标记'
-            : pending === 1
-              ? '提交当前标记并自动进入下一个（Enter）'
-              : `按放置顺序提交全部 ${pending} 个标记（Enter）；Delete 撤掉最后一个，Esc 全部取消`
-        }
-        data-testid="confirm-marker"
-        onClick={() => void confirmMarkerRefined()}
-      >
-        {pending > 1 ? `确认 ${pending} 个点（Enter）` : '确认点（Enter）'}
-      </button>
+          <button
+            className="btn-primary"
+            disabled={pending === 0}
+            title={
+              pending === 0
+                ? '先在画布上点击放置标记'
+                : pending === 1
+                  ? '提交当前标记并自动进入下一个（Enter）'
+                  : `按放置顺序提交全部 ${pending} 个标记（Enter）；Delete 撤掉最后一个，Esc 全部取消`
+            }
+            data-testid="confirm-marker"
+            onClick={() => void confirmMarkerRefined()}
+          >
+            {pending > 1 ? `确认 ${pending} 个点（Enter）` : '确认点（Enter）'}
+          </button>
+        </>
+      )}
 
       <label className="insp-field" title="方向键移动选中点的步进（Shift ×10）">
         <span>方向键步进</span>

@@ -3,7 +3,7 @@
 // 分两步：
 //   buildScene(state, viewport) → Scene   纯函数，可单测
 //   paint(ctx, scene, ...)                唯一副作用出口，仅执行绘制
-// 图层顺序：底图 → 调试扫描带 → 校准（轴线/刻度）→ 数据点 → 吸附轮廓 → 吸附范围 → 当前 marker → 调试点线。
+// 图层顺序：底图 → 调试扫描带 → 校准（轴线/刻度）→ 数据点 → 吸附轮廓 → 吸附范围 → 曲线笔迹 → 当前 marker → 调试点线。
 // 叠加层图形尺寸屏幕空间恒定（§5.2）：buildScene 内以 1/scale 把屏幕像素换算回图像空间，
 // 因此缩放时点标记半径、线宽的屏幕像素尺寸不变。
 // 视觉规范：doc/ui-style-draft.md §3.2/§3.3（单色仪器风 + 画布语义色 + 序列色盘）。
@@ -47,6 +47,7 @@ export const SCREEN_SIZE = {
   selectedAxisWidth: 10,
   tickRadius: 5,
   markerRadius: 4,
+  curvePointRadius: 2.5,
   focusRingGap: 2,
   focusRingWidth: 2,
   sampleRadius: 3,
@@ -80,6 +81,8 @@ export type Primitive =
     }
   | { kind: 'rect'; x: number; y: number; w: number; h: number; fill: string | null; stroke: string | null; strokeWidth: number; alpha: number }
   | { kind: 'polygon'; points: { x: number; y: number }[]; stroke: string; strokeWidth: number; alpha: number }
+  /** 开放折线，圆头圆角（涂抹笔迹、曲线连线） */
+  | { kind: 'polyline'; points: { x: number; y: number }[]; color: string; width: number; alpha: number }
 
 export interface Scene {
   image: { width: number; height: number } | null
@@ -101,6 +104,7 @@ export function buildScene(state: AppState, vp: Viewport): Scene {
   pushPoints(state, px, out)
   pushRefineOutlines(state, px, out)
   pushRefineWindows(state, px, out)
+  pushCurveBrush(state, px, out)
   pushPendingMarker(state, px, out)
   pushDraftLine(state, px, out)
   pushCropOverlay(state, px, out)
@@ -226,9 +230,14 @@ function pushAxis(state: AppState, axis: AxisId, px: (n: number) => number, out:
 }
 
 function pushPoints(state: AppState, px: (n: number) => number, out: Primitive[]): void {
-  const r = px(SCREEN_SIZE.markerRadius)
   state.model.series.forEach((series, index) => {
     const color = seriesColor(index)
+    // 曲线点很密：连线 + 小点，否则一串圆点糊成粗线、看不出走向
+    const curve = series.chartType === 'curve'
+    const r = px(curve ? SCREEN_SIZE.curvePointRadius : SCREEN_SIZE.markerRadius)
+    if (curve && series.points.length > 1) {
+      out.push({ kind: 'polyline', points: series.points.map((p) => p.pixel), color, width: px(1.5), alpha: 0.7 })
+    }
     for (const p of series.points) {
       const selected = state.ui.selectedPointId === p.id
       if (selected) pushSelectionRing(p.pixel.x, p.pixel.y, r, px, out)
@@ -254,7 +263,7 @@ function pushPoints(state: AppState, px: (n: number) => number, out: Primitive[]
 function pushRefineWindows(state: AppState, px: (n: number) => number, out: Primitive[]): void {
   if (state.ui.activeTool !== 'extractMarker') return
   const series = state.model.series.find((x) => x.id === state.model.activeSeriesId)
-  if (!series || series.chartType === 'manual') return
+  if (!series || series.chartType === 'manual' || series.chartType === 'curve') return
   const params =
     series.chartType === 'scatter'
       ? ({ mode: 'scatter', radius: series.scatterRadius } as const)
@@ -272,6 +281,28 @@ function pushRefineWindows(state: AppState, px: (n: number) => number, out: Prim
   const h = state.ui.hoverImage
   if (h && !pending.some((m) => Math.hypot(m.x - h.x, m.y - h.y) < px(SCREEN_SIZE.markerRadius))) {
     out.push(box(h, 0.45))
+  }
+}
+
+/**
+ * 曲线涂抹（取点工具，curve 序列）：未确认笔迹画成笔刷宽的半透明带（= 提取实际搜索的范围）+ 中线；
+ * 光标处画笔刷圆圈；最近一次提取中未找到曲线的采样点画橙点。
+ */
+function pushCurveBrush(state: AppState, px: (n: number) => number, out: Primitive[]): void {
+  if (state.ui.activeTool !== 'extractMarker') return
+  for (const m of state.ui.curveMisses) {
+    out.push({ kind: 'circle', x: m.x, y: m.y, r: px(SCREEN_SIZE.sampleRadius), fill: CANVAS_COLORS.warning, stroke: null, strokeWidth: 0, alpha: 0.9 })
+  }
+  const series = state.model.series.find((x) => x.id === state.model.activeSeriesId)
+  if (series?.chartType !== 'curve') return
+  const stroke = state.ui.curveStroke
+  if (stroke.length > 0) {
+    out.push({ kind: 'polyline', points: stroke, color: CANVAS_COLORS.warning, width: 2 * series.curveRadius, alpha: 0.25 })
+    out.push({ kind: 'polyline', points: stroke, color: CANVAS_COLORS.warning, width: px(1), alpha: 0.9 })
+  }
+  const h = state.ui.hoverImage
+  if (h) {
+    out.push({ kind: 'circle', x: h.x, y: h.y, r: series.curveRadius, fill: null, stroke: CANVAS_COLORS.warning, strokeWidth: px(1), alpha: 0.6 })
   }
 }
 
@@ -378,6 +409,22 @@ export function paint(
           ctx.lineWidth = p.strokeWidth
           ctx.strokeRect(p.x, p.y, p.w, p.h)
         }
+        break
+      case 'polyline':
+        if (p.points.length === 0) break
+        ctx.strokeStyle = p.color
+        ctx.lineWidth = p.width
+        ctx.lineCap = 'round'
+        ctx.lineJoin = 'round'
+        ctx.setLineDash([])
+        ctx.beginPath()
+        ctx.moveTo(p.points[0].x, p.points[0].y)
+        // 单点也画出圆头
+        if (p.points.length === 1) ctx.lineTo(p.points[0].x, p.points[0].y)
+        for (const q of p.points.slice(1)) ctx.lineTo(q.x, q.y)
+        ctx.stroke()
+        ctx.lineCap = 'butt'
+        ctx.lineJoin = 'miter'
         break
       case 'polygon':
         if (p.points.length < 2) break

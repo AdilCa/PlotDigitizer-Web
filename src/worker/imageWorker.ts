@@ -1,7 +1,7 @@
 // imageWorker.ts — Worker 入口（§5.2 渲染管线 / §3 决策 4）
 // 持有的可变状态仅限处理轨像素与源句柄：
 //   gray（常驻，1B/px）、background（全图背景色，散点 refine 用）、
-//   bitmap（原图 RGBA；长边 >4096 灰度化后即释放，§5.4；散点 refine 按点读局部块）、
+//   bitmap（原图 RGBA；长边 >4096 灰度化后即释放，§5.4；散点 refine / 曲线提取按需读局部块）、
 //   sourceFile（File 句柄，供释放分支重解码）、
 //   region（当前图像在原图坐标系中的位置与尺寸，多次裁剪累计；不受降采样影响）。
 // 业务 model 只在主线程；本 Worker 不存任何校准/取点数据。
@@ -9,7 +9,8 @@ import { toGray } from '../engine/gray'
 import { fitAxis } from '../engine/axisFitter'
 import { fitTicks } from '../engine/tickFitter'
 import { refineBar, type RefineResult } from '../engine/refine'
-import { estimateBackground, refineScatter, scatterPatchRect, type Rgb } from '../engine/markerBlob'
+import { estimateBackground, refineScatter, scatterPatchRect, type Rgb, type RgbaPatch } from '../engine/markerBlob'
+import { curvePatchRect, traceCurve } from '../engine/curveTrace'
 import { labelFontSize, placeLabel } from '../render/annotatedLabel'
 import {
   PROCESS_TRACK_RELEASE_EDGE,
@@ -61,27 +62,45 @@ function rasterizeToGray(bmp: ImageBitmap): Uint8Array {
   return toGray(data, bmp.width, bmp.height)
 }
 
-/** 散点 refine：每个点按 scatterPatchRect 读一块铺白后的 RGBA；一批只取一次原图（已释放分支重解码一次） */
-async function refineScatterBatch(items: { x: number; y: number; r: number }[]): Promise<RefineResult[]> {
+/** 按矩形读铺白后的 RGBA 局部块（ctx 复用，一批请求只建一次） */
+function readPatch(
+  ctx: OffscreenCanvasRenderingContext2D,
+  src: ImageBitmap,
+  rect: { x: number; y: number; w: number; h: number },
+): RgbaPatch {
+  if (rect.w <= 0 || rect.h <= 0) return { data: new Uint8ClampedArray(0), ...rect }
+  ctx.canvas.width = rect.w
+  ctx.canvas.height = rect.h
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, rect.w, rect.h)
+  ctx.drawImage(src, rect.x, rect.y, rect.w, rect.h, 0, 0, rect.w, rect.h)
+  return { data: ctx.getImageData(0, 0, rect.w, rect.h).data, ...rect }
+}
+
+/** 取处理轨原图执行 fn；已释放分支（>4096）重解码一次，用完释放 */
+async function withSource<T>(fn: (src: ImageBitmap, ctx: OffscreenCanvasRenderingContext2D) => T): Promise<T> {
   const src = bitmap ?? (await decodeRegionFromSource())
   const srcIsTemp = bitmap === null
-  const oc = new OffscreenCanvas(1, 1)
-  const ctx = oc.getContext('2d', { willReadFrequently: true })!
-  const out = items.map((it) => {
-    const rect = scatterPatchRect(it, it.r, width, height)
-    let data = new Uint8ClampedArray(0)
-    if (rect.w > 0 && rect.h > 0) {
-      oc.width = rect.w
-      oc.height = rect.h
-      ctx.fillStyle = '#ffffff'
-      ctx.fillRect(0, 0, rect.w, rect.h)
-      ctx.drawImage(src, rect.x, rect.y, rect.w, rect.h, 0, 0, rect.w, rect.h)
-      data = ctx.getImageData(0, 0, rect.w, rect.h).data
-    }
-    return refineScatter(it, { data, ...rect }, background, it.r)
-  })
-  if (srcIsTemp) src.close()
-  return out
+  const ctx = new OffscreenCanvas(1, 1).getContext('2d', { willReadFrequently: true })!
+  try {
+    return fn(src, ctx)
+  } finally {
+    if (srcIsTemp) src.close()
+  }
+}
+
+/** 散点 refine：每个点按 scatterPatchRect 读一块局部 RGBA */
+function refineScatterBatch(items: { x: number; y: number; r: number }[]): Promise<RefineResult[]> {
+  return withSource((src, ctx) =>
+    items.map((it) => refineScatter(it, readPatch(ctx, src, scatterPatchRect(it, it.r, width, height)), background, it.r)),
+  )
+}
+
+/** 曲线提取：按笔迹外接框读一块局部 RGBA */
+function handleTraceCurve(stroke: { x: number; y: number }[], radius: number, step: number) {
+  return withSource((src, ctx) =>
+    traceCurve(stroke, readPatch(ctx, src, curvePatchRect(stroke, radius, width, height)), background, radius, step),
+  )
 }
 
 /** 获取当前处理轨原图；已释放（>4096）时从 File 句柄按累计区域重解码（§5.4），用完由调用方释放 */
@@ -263,6 +282,13 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
           return { refId: it.refId, ...out }
         })
         const resp: WorkerResponse = { id: req.id, reqType: 'refinePoints', ok: true, refined }
+        self.postMessage(resp)
+        break
+      }
+      case 'traceCurve': {
+        if (!gray) throw new Error('Worker 无图像数据，请先加载图像')
+        const r = await handleTraceCurve(req.stroke, req.radius, req.step)
+        const resp: WorkerResponse = { id: req.id, reqType: 'traceCurve', ok: true, ...r }
         self.postMessage(resp)
         break
       }

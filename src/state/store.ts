@@ -48,6 +48,10 @@ export interface UiState {
   batchPick: boolean
   /** 最近一次 Confirm 的散点吸附轮廓（凸包）；点被移动或删除后不再显示 */
   refineOutlines: { pointId: string; at: PixelPoint; outline: PixelPoint[] }[]
+  /** 曲线序列未确认的涂抹笔迹（图像坐标，按涂抹顺序）；Confirm 时整笔送 Worker 提取 */
+  curveStroke: PixelPoint[]
+  /** 最近一次曲线提取中笔迹上未找到曲线的采样点（画布橙点标出；换工具/再次提取时清除） */
+  curveMisses: PixelPoint[]
   selectedPointId: string | null
   selectedTickId: string | null
   /** 画轴工具下短按选中的轴线（Delete 删除，§6.2） */
@@ -103,6 +107,8 @@ export function createFreshUi(): UiState {
     pendingMarkers: [],
     batchPick: false,
     refineOutlines: [],
+    curveStroke: [],
+    curveMisses: [],
     selectedPointId: null,
     selectedTickId: null,
     selectedAxis: null,

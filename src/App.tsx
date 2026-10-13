@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { useStore } from './state/store'
 import {
+  clearCurveStroke,
   confirmMarkerRefined,
   deleteAxisLine,
   deletePoint,
@@ -141,7 +142,7 @@ export default function App() {
 
       // Enter：取点工具下 Confirm 提交（§6.3）；按住不放的自动重复不重复提交
       if (e.key === 'Enter') {
-        if (s.ui.activeTool === 'extractMarker' && s.ui.pendingMarkers.length > 0) {
+        if (s.ui.activeTool === 'extractMarker' && (s.ui.pendingMarkers.length > 0 || s.ui.curveStroke.length > 1)) {
           if (!e.repeat) void confirmMarkerRefined()
           e.preventDefault()
           return
@@ -187,8 +188,14 @@ export default function App() {
         }
       }
 
-      // Esc：取消当前未确认标记；否则取消点/刻度选中（§3；裁剪的 Esc 已在 handleCropKey 消费）
+      // Esc：清除未确认笔迹 / 取消未确认标记；否则取消点/刻度选中（§3；裁剪的 Esc 已在 handleCropKey 消费）
       if (e.key === 'Escape') {
+        if (s.ui.curveStroke.length > 0) {
+          clearCurveStroke()
+          setStatus('已清除未确认的涂抹笔迹')
+          e.preventDefault()
+          return
+        }
         const n = s.ui.pendingMarkers.length
         if (n > 0) {
           setPendingMarker(null)

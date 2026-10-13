@@ -42,6 +42,14 @@ export interface RefinedItem {
   outline?: FitPixelPoint[]
 }
 
+/** 曲线提取结果（§4.6）：points 按笔迹方向排序；misses 为笔迹上未找到曲线的采样点 */
+export interface TracedCurve {
+  points: FitPixelPoint[]
+  misses: FitPixelPoint[]
+  color: { r: number; g: number; b: number } | null
+  reason?: string
+}
+
 /** 标注截图的标记点（§7.2：按序列着色，颜色由主线程色盘决定） */
 export interface AnnotatedMarker {
   x: number
@@ -78,6 +86,7 @@ export type WorkerRequest =
       scanHalf?: number
     }
   | { id: number; type: 'refinePoints'; items: RefineItem[] }
+  | { id: number; type: 'traceCurve'; stroke: FitPixelPoint[]; radius: number; step: number }
   | { id: number; type: 'exportImagePng' }
   | { id: number; type: 'renderAnnotated'; markers: AnnotatedMarker[] }
   | { id: number; type: 'dispose' }
@@ -133,6 +142,7 @@ export type WorkerResponse =
       /** 与请求 items 等长同序（refId 原样回带） */
       refined: RefinedItem[]
     }
+  | ({ id: number; reqType: 'traceCurve'; ok: true } & TracedCurve)
   /** 失败响应带算法诊断（扫描带/候选线等，纯 JSON），供内联可视化（铁律 5） */
   | { id: number; reqType: string; ok: false; error: string; diagnostics?: unknown }
 

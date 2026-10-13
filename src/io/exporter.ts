@@ -33,8 +33,14 @@ export function annotatedName(mdBase: string): string {
 /** 生成导出物（纯数据组装 + Worker 渲染；无副作用，可测性由 buildMarkdown 承担） */
 export async function produceExport(form: ExportForm): Promise<{ md: Blob; png: Blob; pngName: string }> {
   const { model } = useStore.getState()
+  // 曲线序列点很密，标点名会把图盖满，只画点
   const markers = model.series.flatMap((s, i) =>
-    s.points.map((p) => ({ x: p.pixel.x, y: p.pixel.y, color: SERIES_COLORS[i % SERIES_COLORS.length], name: p.name })),
+    s.points.map((p) => ({
+      x: p.pixel.x,
+      y: p.pixel.y,
+      color: SERIES_COLORS[i % SERIES_COLORS.length],
+      name: s.chartType === 'curve' ? '' : p.name,
+    })),
   )
   const pngBytes = await workerRenderAnnotated(markers)
   const pngName = `${annotatedName(form.fileName)}.png`

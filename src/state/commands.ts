@@ -18,7 +18,7 @@ import {
   type ToolId,
 } from './model'
 import { canSkipAxis, toolFallback } from './selectors'
-import { workerRefinePoints } from '../worker/workerClient'
+import { workerRefinePoints, workerTraceCurve } from '../worker/workerClient'
 
 const set = useStore.setState
 const get = useStore.getState
@@ -55,6 +55,8 @@ export function resetModelKeepingImage(next?: Partial<ImageRef>): void {
     s.model = { ...createEmptyModel(), image }
     s.ui.pendingMarkers = []
     s.ui.refineOutlines = []
+    s.ui.curveStroke = []
+    s.ui.curveMisses = []
     s.ui.selectedPointId = null
     s.ui.selectedTickId = null
     s.ui.selectedAxis = null
@@ -75,6 +77,8 @@ export function setActiveTool(tool: ToolId): void {
   set((s) => {
     s.ui.activeTool = tool
     s.ui.pendingMarkers = []
+    s.ui.curveStroke = []
+    s.ui.curveMisses = []
     s.ui.selectedPointId = null
     s.ui.selectedTickId = null
     s.ui.selectedAxis = null
@@ -385,17 +389,23 @@ export function deleteSeries(id: string): void {
   })
 }
 
+/** 切换序列 / 图表类型时丢弃未确认的笔迹：它是按旧序列的笔刷画的，确认会进错序列 */
 export function setActiveSeries(id: string): void {
   set((s) => {
-    if (s.model.series.some((x) => x.id === id)) s.model.activeSeriesId = id
+    if (!s.model.series.some((x) => x.id === id) || s.model.activeSeriesId === id) return
+    s.model.activeSeriesId = id
+    s.ui.curveStroke = []
   })
 }
 
-/** 切换 chartType 只影响该序列后续输入的 refine 方式（§6.5） */
+/** 切换 chartType 只影响该序列后续输入的 refine 方式（§6.5）；未确认的标记与笔迹一并丢弃 */
 export function setChartType(id: string, chartType: ChartType): void {
   set((s) => {
     const series = s.model.series.find((x) => x.id === id)
-    if (series) series.chartType = chartType
+    if (!series || series.chartType === chartType) return
+    series.chartType = chartType
+    s.ui.pendingMarkers = []
+    s.ui.curveStroke = []
   })
 }
 
@@ -421,6 +431,24 @@ export function setScatterRadius(id: string, radius: number): void {
   set((s) => {
     const series = s.model.series.find((x) => x.id === id)
     if (series) series.scatterRadius = Math.min(60, Math.max(1, Math.round(radius)))
+  })
+}
+
+/** 曲线笔刷半径（px，取整并钳制到 2–60） */
+export function setCurveRadius(id: string, radius: number): void {
+  if (!Number.isFinite(radius)) return
+  set((s) => {
+    const series = s.model.series.find((x) => x.id === id)
+    if (series) series.curveRadius = Math.min(60, Math.max(2, Math.round(radius)))
+  })
+}
+
+/** 曲线采样间隔（px，钳制到 1–50） */
+export function setCurveStep(id: string, step: number): void {
+  if (!Number.isFinite(step)) return
+  set((s) => {
+    const series = s.model.series.find((x) => x.id === id)
+    if (series) series.curveStep = Math.min(50, Math.max(1, step))
   })
 }
 
@@ -459,6 +487,84 @@ export function popPendingMarker(): void {
   set((s) => {
     s.ui.pendingMarkers.pop()
   })
+}
+
+// ---------------------------------------------------------------- 曲线涂抹（§4.6）
+
+/** 开始一笔新的涂抹（替换未确认的旧笔迹；接着旧笔迹末端涂由 extendCurveStroke 处理） */
+export function beginCurveStroke(p: PixelPoint): void {
+  set((s) => {
+    s.ui.curveStroke = [p]
+    s.ui.curveMisses = []
+  })
+}
+
+export function extendCurveStroke(p: PixelPoint): void {
+  set((s) => {
+    s.ui.curveStroke.push(p)
+  })
+}
+
+export function clearCurveStroke(): void {
+  set((s) => {
+    s.ui.curveStroke = []
+  })
+}
+
+/**
+ * 曲线 Confirm：整笔送 Worker 提取，结果按笔迹方向编号提交到活动序列。
+ * 一个点都没提取到或 Worker 失败时笔迹放回去（不丢用户的涂抹，可调参数后直接重试）；在途期间换图则丢弃结果。
+ */
+export async function confirmCurve(): Promise<string[]> {
+  const { model, ui } = get()
+  const series = model.series.find((x) => x.id === model.activeSeriesId)
+  if (!series) {
+    setStatus('请先在序列面板新建并选中一个序列')
+    return []
+  }
+  const stroke = ui.curveStroke
+  if (stroke.length < 2) return []
+  const image = model.image
+  set((s) => {
+    s.ui.curveStroke = []
+    s.ui.curveMisses = []
+  })
+  setStatus('正在提取曲线…')
+  const restore = (message: string) => {
+    if (get().ui.curveStroke.length === 0) {
+      set((s) => {
+        s.ui.curveStroke = stroke
+      })
+    }
+    setStatus(message)
+  }
+  try {
+    const r = await workerTraceCurve(stroke, series.curveRadius, series.curveStep)
+    if (get().model.image !== image) return []
+    if (r.points.length === 0) {
+      restore(`未提取到曲线：${r.reason ?? '笔迹沿线没有找到曲线'}；可调整笔刷后按 Enter 重试，或 Esc 清除笔迹重涂`)
+      return []
+    }
+    const ids = commitPoints(series.id, r.points)
+    set((s) => {
+      s.ui.curveMisses = r.misses
+    })
+    const color = r.color ? `，曲线色 ${rgbHex(r.color)}` : ''
+    const gaps =
+      r.misses.length === 0
+        ? '，全程无缺口'
+        : `；${r.misses.length} 个采样点未找到曲线（橙点标出：被别的线压住、交叠或笔迹偏出），需要的话手动补点`
+    setStatus(`已提取 ${nameRange(series.id, ids)}${color}${gaps}`)
+    return ids
+  } catch (err) {
+    if (get().model.image !== image) return []
+    restore(`曲线提取失败（${err instanceof Error ? err.message : String(err)}）`)
+    return []
+  }
+}
+
+function rgbHex(c: { r: number; g: number; b: number }): string {
+  return '#' + [c.r, c.g, c.b].map((v) => Math.round(v).toString(16).padStart(2, '0')).join('').toUpperCase()
 }
 
 /** 只决定点击空白是追加还是替换；切换时不动已放下的标记 */
@@ -514,15 +620,18 @@ const DIR_LABEL: Record<BarScanDirection, string> = { down: '向下', up: '向�
 
 /**
  * Confirm 主路径（§6.3）：一次提交全部待确认标记，按活动序列 chartType 决定是否 refine——
- * scatter → Worker 暗度质心；bar → Worker 沿 barDirection 扫描；manual → 原位提交。
+ * scatter → Worker 颜色分割重心；bar → Worker 沿 barDirection 扫描；manual → 原位提交；
+ * curve → 转 confirmCurve（提交的是涂抹笔迹，不是标记）。
  * 一批点一次 Worker 请求，按点击顺序编号。未找到特征或 Worker 失败时按原位提交并内联提示
  * （铁律 5：不丢弃用户的点击数据）；refine 在途期间若换图则丢弃结果。
  */
 export async function confirmMarkerRefined(): Promise<string[]> {
+  const { model } = get()
+  if (model.series.find((x) => x.id === model.activeSeriesId)?.chartType === 'curve') return confirmCurve()
   const taken = takePending()
   if (!taken) return []
   const { series, pts } = taken
-  if (series.chartType === 'manual') {
+  if (series.chartType === 'manual' || series.chartType === 'curve') {
     const ids = commitPoints(series.id, pts)
     if (ids.length > 0) setStatus(`已确认 ${nameRange(series.id, ids)}（手动：按点击位置提交，不吸附）`)
     return ids

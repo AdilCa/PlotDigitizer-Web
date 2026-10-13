@@ -71,6 +71,8 @@ describe('hitPoint：数据点命中（§6.3，M3-3 屏幕恒定半径换算）'
       barDirection: 'down',
       barSpan: 40,
       scatterRadius: 8,
+      curveRadius: 10,
+      curveStep: 4,
       pointPrefix: 'A',
       nextPointSeq: 2,
       points: [
@@ -85,6 +87,8 @@ describe('hitPoint：数据点命中（§6.3，M3-3 屏幕恒定半径换算）'
       barDirection: 'down',
       barSpan: 40,
       scatterRadius: 8,
+      curveRadius: 10,
+      curveStep: 4,
       pointPrefix: 'B',
       nextPointSeq: 1,
       points: [{ id: 'p3', pixel: { x: 108, y: 108 }, name: 'B1' }],

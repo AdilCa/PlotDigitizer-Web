@@ -10,7 +10,7 @@ export type AxisId = 'x' | 'y'
 
 export type ScaleType = 'linear' | 'log'
 
-export type ChartType = 'scatter' | 'bar' | 'manual'
+export type ChartType = 'scatter' | 'bar' | 'curve' | 'manual'
 
 /** 柱状序列扫描方向（§4.4），仅 chartType = 'bar' 有意义，默认向下 */
 export type BarScanDirection = 'up' | 'down' | 'left' | 'right'
@@ -72,6 +72,10 @@ export interface Series {
   barSpan: number
   /** 散点序列的吸附窗口半径（px，窗口 (2r+1)²，§4.4）；调到刚好框住一个标记，网格/文字不进窗口 */
   scatterRadius: number
+  /** 曲线序列的涂抹笔刷半径（px，§4.6）；盖住曲线即可，越窄越不容易蹭到别的线 */
+  curveRadius: number
+  /** 曲线序列沿笔迹的采样间隔（px，§4.6） */
+  curveStep: number
   /** 点命名前缀，默认取序列名（§7.2） */
   pointPrefix: string
   points: SeriesPoint[]
@@ -109,6 +113,8 @@ export function createAxisCalibration(): AxisCalibration {
 
 export const DEFAULT_BAR_SPAN = 40
 export const DEFAULT_SCATTER_RADIUS = 8
+export const DEFAULT_CURVE_RADIUS = 10
+export const DEFAULT_CURVE_STEP = 4
 
 export function createSeries(name: string, chartType: ChartType): Series {
   return {
@@ -118,6 +124,8 @@ export function createSeries(name: string, chartType: ChartType): Series {
     barDirection: 'down',
     barSpan: DEFAULT_BAR_SPAN,
     scatterRadius: DEFAULT_SCATTER_RADIUS,
+    curveRadius: DEFAULT_CURVE_RADIUS,
+    curveStep: DEFAULT_CURVE_STEP,
     pointPrefix: name,
     points: [],
     nextPointSeq: 1,

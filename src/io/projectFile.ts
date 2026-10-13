@@ -2,7 +2,14 @@
 // store-only zip 容器：`project.json`（model 全量，v1 schema，含 version 字段）
 // + `image.png`（编辑烘焙后的当前图像，恢复时无需重放编辑历史）。
 // 与 C++ 版脱钩，不兼容旧文件、无迁移路径。
-import { createEmptyModel, DEFAULT_BAR_SPAN, DEFAULT_SCATTER_RADIUS, type ProjectModel } from '../state/model'
+import {
+  createEmptyModel,
+  DEFAULT_BAR_SPAN,
+  DEFAULT_CURVE_RADIUS,
+  DEFAULT_CURVE_STEP,
+  DEFAULT_SCATTER_RADIUS,
+  type ProjectModel,
+} from '../state/model'
 import { readZip, writeZip } from './zipStore'
 
 export const PROJECT_JSON_ENTRY = 'project.json'
@@ -45,6 +52,8 @@ export function parseProjectJson(bytes: Uint8Array): ProjectModel {
       ...s,
       barSpan: s.barSpan ?? DEFAULT_BAR_SPAN,
       scatterRadius: s.scatterRadius ?? DEFAULT_SCATTER_RADIUS,
+      curveRadius: s.curveRadius ?? DEFAULT_CURVE_RADIUS,
+      curveStep: s.curveStep ?? DEFAULT_CURVE_STEP,
     })),
   } as ProjectModel
 }

@@ -2,7 +2,15 @@
 import type { AxisFitDiagnostics } from '../engine/axisFitter'
 import type { TickFitDiagnostics } from '../engine/tickFitter'
 import type { AxisId, PixelPoint } from '../state/model'
-import type { AnnotatedMarker, CropRect, RefinedItem, RefineItem, WorkerRequest, WorkerResponse } from './protocol'
+import type {
+  AnnotatedMarker,
+  CropRect,
+  RefinedItem,
+  RefineItem,
+  TracedCurve,
+  WorkerRequest,
+  WorkerResponse,
+} from './protocol'
 
 /** 算法失败时 reject 的错误类型：携带 engine 诊断（扫描带/候选线），供调试叠加层可视化 */
 export class WorkerRequestError extends Error {
@@ -143,4 +151,15 @@ export async function workerRefinePoints(items: RefineItem[]): Promise<RefinedIt
     items,
   })
   return resp.refined
+}
+
+/** 曲线提取（§4.6）：一笔涂抹 → 沿笔迹的曲线点；一个点都没找到时 points 为空、reason 说明原因 */
+export async function workerTraceCurve(stroke: PixelPoint[], radius: number, step: number): Promise<TracedCurve> {
+  const resp = await request<Extract<WorkerResponse, { reqType: 'traceCurve'; ok: true }>>({
+    type: 'traceCurve',
+    stroke,
+    radius,
+    step,
+  })
+  return { points: resp.points, misses: resp.misses, color: resp.color, reason: resp.reason }
 }
