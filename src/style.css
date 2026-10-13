@@ -490,6 +490,17 @@ select:focus-visible {
   font-size: 11px;
 }
 
+.point-list-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  border-top: 1px dashed #e0e0dc;
+  padding-top: 6px;
+  font-size: 11px;
+  color: #8f8f88;
+}
+
 .point-list {
   display: flex;
   flex-direction: column;

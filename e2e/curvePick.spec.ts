@@ -68,4 +68,12 @@ test('沿红线涂抹一笔 → Enter 提取，点全部落在红线上，画布
     expect(d).toBeLessThanOrEqual(1)
   }
   await page.screenshot({ path: shot('extracted.png') })
+
+  // 曲线点列表默认折叠成一行摘要，可展开 / 收起
+  await expect(page.getByTestId('point-list-summary')).toContainText(`${got.length} 个点（序列 11–`)
+  await expect(page.getByTestId('point-row-0')).toHaveCount(0)
+  await page.getByTestId('point-list-toggle').click()
+  await expect(page.getByTestId(`point-row-${got.length - 1}`)).toBeVisible()
+  await page.getByTestId('point-list-toggle').click()
+  await expect(page.getByTestId('point-row-0')).toHaveCount(0)
 })

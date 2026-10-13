@@ -472,6 +472,9 @@ function ExtractBlock() {
   const strokeLen = useStore((s) => s.ui.curveStroke.length)
   const active = series.find((x) => x.id === activeId) ?? null
   const curve = active?.chartType === 'curve'
+  // 曲线点多，点列表默认折叠成一行摘要；展开状态只跟着当前序列，切走再切回即折叠
+  const [expandedSeries, setExpandedSeries] = useState<string | null>(null)
+  const pointsExpanded = active !== null && expandedSeries === active.id
 
   return (
     <div className="axis-block" data-testid="extract-block">
@@ -591,7 +594,22 @@ function ExtractBlock() {
             </>
           )}
 
-          {active.points.length > 0 && (
+          {active.points.length > 0 && curve && (
+            <div className="point-list-summary" data-testid="point-list-summary">
+              <span>
+                {active.points.length} 个点（{active.points[0].name}–{active.points[active.points.length - 1].name}）
+              </span>
+              <button
+                className="btn-ghost"
+                title={pointsExpanded ? '收起点列表' : '展开逐点列表（改名、选中）；单个点也可以直接在画布上点选、拖动、Delete 删除'}
+                data-testid="point-list-toggle"
+                onClick={() => setExpandedSeries(pointsExpanded ? null : active.id)}
+              >
+                {pointsExpanded ? '收起' : '展开'}
+              </button>
+            </div>
+          )}
+          {active.points.length > 0 && (!curve || pointsExpanded) && (
             <div className="point-list">
               {active.points.map((_, i) => (
                 <PointRow key={active.points[i].id} sr={active} index={i} />
