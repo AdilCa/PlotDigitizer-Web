@@ -32,7 +32,9 @@ test('沿红线涂抹一笔 → Enter 提取，点全部落在红线上，画布
   })
   await page.getByTestId('add-series').click()
   await page.getByTestId('new-series-curve').click()
-  await page.getByRole('button', { name: '取点', exact: true }).click()
+  // 选完图表类型直接进入取点工具，不用再点左侧「取点」
+  await expect(page.getByRole('button', { name: '取点', exact: true })).toHaveClass(/active/)
+  await expect(page.locator('.status-bar')).toContainText('已切换到取点工具：沿曲线按住拖动涂抹一笔')
   await page.getByTestId('curve-radius').fill('8')
 
   // 手涂：沿红线大致走向，整体偏 (+2, −2)

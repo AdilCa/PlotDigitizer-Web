@@ -428,6 +428,26 @@ const CHART_TYPE_TITLE: Record<ChartType, string> = {
   manual: '按点击位置原样提交，不做吸附',
 }
 
+const PICK_HINT: Record<ChartType, string> = {
+  scatter: '点击标记附近放置，Enter 确认吸附',
+  bar: '在柱顶外侧点击，Enter 确认',
+  curve: '沿曲线按住拖动涂抹一笔，Enter 提取',
+  manual: '点击目标位置，Enter 确认',
+}
+
+/** 选定图表类型就是要开始取点：直接进入取点工具；门控不通过时只在状态栏说明还差什么 */
+function enterPickTool(chartType: ChartType): void {
+  const s = useStore.getState()
+  if (s.ui.activeTool === 'extractMarker') return
+  const gate = gateFor(s, 'extractMarker')
+  if (!gate.enabled || s.ui.cropBusy) {
+    setStatus(`序列已就绪，但还不能取点：${gate.enabled ? '正在裁剪' : gate.reason}`)
+    return
+  }
+  setActiveTool('extractMarker')
+  setStatus(`已切换到取点工具：${PICK_HINT[chartType]}`)
+}
+
 function NewSeriesPicker() {
   const [open, setOpen] = useState(false)
   if (!open) {
@@ -450,6 +470,7 @@ function NewSeriesPicker() {
             onClick={() => {
               addSeries(t)
               setOpen(false)
+              enterPickTool(t)
             }}
           >
             {CHART_TYPE_LABEL[t]}
@@ -500,7 +521,11 @@ function ExtractBlock() {
             <select
               value={active.chartType}
               data-testid="chart-type"
-              onChange={(e) => setChartType(active.id, e.target.value as ChartType)}
+              onChange={(e) => {
+                const t = e.target.value as ChartType
+                setChartType(active.id, t)
+                enterPickTool(t)
+              }}
             >
               <option value="scatter">散点</option>
               <option value="bar">柱状</option>
