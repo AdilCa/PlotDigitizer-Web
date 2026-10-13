@@ -501,6 +501,16 @@ select:focus-visible {
   color: #8f8f88;
 }
 
+.point-list-summary > span {
+  min-width: 0;
+}
+
+/* 摘要文字长时由文字折行，按钮不被挤窄（否则「收起」两个字会竖排） */
+.point-list-summary > button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .point-list {
   display: flex;
   flex-direction: column;

@@ -74,6 +74,10 @@ test('沿红线涂抹一笔 → Enter 提取，点全部落在红线上，画布
   await expect(page.getByTestId('point-row-0')).toHaveCount(0)
   await page.getByTestId('point-list-toggle').click()
   await expect(page.getByTestId(`point-row-${got.length - 1}`)).toBeVisible()
+  await expect(page.getByTestId('point-list-toggle')).toHaveText('收起')
+  const box = (await page.getByTestId('point-list-toggle').boundingBox())!
+  expect(box.width).toBeGreaterThan(box.height) // 按钮文字横排，不被摘要挤成竖排
+  await page.getByTestId('point-list-summary').screenshot({ path: shot('summary-expanded.png') })
   await page.getByTestId('point-list-toggle').click()
   await expect(page.getByTestId('point-row-0')).toHaveCount(0)
 })
