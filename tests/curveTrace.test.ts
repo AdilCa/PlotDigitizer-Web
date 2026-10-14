@@ -17,10 +17,11 @@ function makeImg(W: number, H: number): Img {
   return { rgba, W, H }
 }
 
-/** 4×4 超采样按覆盖率混色 */
-function paint(img: Img, c: Rgb, inside: (x: number, y: number) => boolean): void {
-  for (let y = 0; y < img.H; y++) {
-    for (let x = 0; x < img.W; x++) {
+/** 4×4 超采样按覆盖率混色；box = [x0, y0, x1, y1] 限定扫描范围 */
+function paint(img: Img, c: Rgb, inside: (x: number, y: number) => boolean, box?: [number, number, number, number]): void {
+  const [bx0, by0, bx1, by1] = box ?? [0, 0, img.W, img.H]
+  for (let y = Math.max(0, Math.floor(by0)); y < Math.min(img.H, Math.ceil(by1)); y++) {
+    for (let x = Math.max(0, Math.floor(bx0)); x < Math.min(img.W, Math.ceil(bx1)); x++) {
       let hit = 0
       for (let sy = 0; sy < 4; sy++) for (let sx = 0; sx < 4; sx++) if (inside(x + (sx + 0.5) / 4, y + (sy + 0.5) / 4)) hit++
       if (hit === 0) continue
@@ -130,6 +131,93 @@ describe('traceCurve：合成曲线', () => {
     const out = trace(img, strokeAlong(sine, 20, 220))
     expect(Math.max(...out.points.map((p) => p.x))).toBeLessThan(152)
     expect(out.misses.length).toBeGreaterThan(15)
+  })
+
+  /** 沿 f 每 gap px 放一个空心标记：圆（外径 R、线宽 lw）或三角（重心在曲线上） */
+  const hollowCircle = (cx: number, cy: number, R: number, lw: number) => (x: number, y: number) =>
+    Math.abs(Math.hypot(x - cx, y - cy) - (R - lw / 2)) <= lw / 2
+  const hollowTriangle = (cx: number, cy: number, R: number, lw: number) => {
+    const inTri = (x: number, y: number, s: number) => {
+      // 正三角（尖朝上），外接圆半径 s，重心 (cx, cy)
+      const u = y - cy
+      return u <= s / 2 && u >= -s && Math.abs(x - cx) <= ((u + s) / 1.5) * (Math.sqrt(3) / 2)
+    }
+    return (x: number, y: number) => inTri(x, y, R) && !inTri(x, y, R - 2 * lw)
+  }
+  const hollowSquare = (cx: number, cy: number, R: number, lw: number) => (x: number, y: number) => {
+    const m = Math.max(Math.abs(x - cx), Math.abs(y - cy))
+    return m <= 0.8 * R && m >= 0.8 * R - lw
+  }
+  const markersAlong = (img: Img, f: (x: number) => number, x0: number, x1: number, gap: number, shape: typeof hollowCircle) => {
+    const ms: ((x: number, y: number) => boolean)[] = []
+    for (let x = x0; x <= x1; x += gap) ms.push(shape(x, f(x), 7, 1.5))
+    paint(img, RED, (x, y) => ms.some((m) => m(x, y)))
+  }
+
+  // 稀疏三角不测：尖角处截面中点离重心 ~3px，属于形状本身，稀疏标记应改用散点模式逐个点
+  for (const [name, shape, gap] of [
+    ['空心圆', hollowCircle, 5],
+    ['空心圆', hollowCircle, 16],
+    ['空心三角', hollowTriangle, 5],
+  ] as const) {
+    it(`${name}串（间距 ${gap}px）：点落在标记中线 ±1.5px，不贴边框`, () => {
+      const img = makeImg(260, 120)
+      markersAlong(img, sine, 20, 240, gap, shape)
+      const out = trace(img, strokeAlong(sine, 25, 235, 0, 3), 12, 3)
+      expect(out.points.length).toBeGreaterThan(gap === 5 ? 50 : 20)
+      for (const p of out.points) expect(normalDist(sine, p)).toBeLessThan(1.5)
+    })
+  }
+
+  it('大空心三角斜向密排（外沿锯齿）+ 手抖笔迹：按带宽平滑，不随标记周期摆动', () => {
+    const img = makeImg(300, 200)
+    const slope = (x: number) => 170 - 0.55 * x
+    const ms: ((x: number, y: number) => boolean)[] = []
+    for (let x = 20; x <= 280; x += 9) ms.push(hollowTriangle(x, slope(x), 13, 2.5))
+    paint(img, RED, (x, y) => ms.some((m) => m(x, y)))
+    const stroke = strokeAlong(slope, 30, 270, 0, 3).map((p) => ({ x: p.x, y: p.y + 2 * Math.sin(p.x / 13) }))
+    const out = trace(img, stroke, 20, 4)
+    expect(out.points.length).toBeGreaterThan(50)
+    // 三角重心在 slope 上；带子外沿两侧不对称，允许整体偏一点，但沿线摆动要小
+    const res = out.points.filter((p) => p.x > 45 && p.x < 255).map((p) => p.y - slope(p.x))
+    const mean = res.reduce((a, b) => a + b, 0) / res.length
+    expect(Math.abs(mean)).toBeLessThan(2)
+    // 不平滑时摆动 ~2.6px
+    for (const d of res) expect(Math.abs(d - mean)).toBeLessThan(0.6)
+  })
+
+  it('三条空心标记带向左汇聚、后画的压住先画的：被压住一侧按可见边缘推重心，不贴着露出来的那半边', () => {
+    const img = makeImg(500, 360)
+    const bands = [
+      { f: (x: number) => 330 - 0.0004 * x * x, c: { r: 20, g: 170, b: 200 }, shape: hollowTriangle },
+      { f: (x: number) => 330 - 0.0007 * x * x, c: { r: 20, g: 50, b: 210 }, shape: hollowSquare },
+      { f: (x: number) => 330 - 0.001 * x * x, c: { r: 140, g: 20, b: 160 }, shape: hollowTriangle },
+    ]
+    for (const { f, c, shape } of bands) {
+      for (let x = 10; x <= 490; x += 8) paint(img, c, shape(x, f(x), 12, 2.5), [x - 14, f(x) - 14, x + 14, f(x) + 14])
+    }
+    for (const { f } of bands) {
+      const stroke = strokeAlong(f, 30, 470, 0, 3).map((p) => ({ x: p.x, y: p.y + 2 * Math.sin(p.x / 13) }))
+      const out = trace(img, stroke, 20, 4)
+      const inner = out.points.filter((p) => p.x > 50 && p.x < 450)
+      expect(inner.length).toBeGreaterThan(70)
+      const ds = inner.map((p) => p.y - f(p.x))
+      // 不做遮挡修正时被压住的带子一路偏 4–8px（均方根 2.6–4.7）
+      expect(Math.sqrt(ds.reduce((a, d) => a + d * d, 0) / ds.length)).toBeLessThan(1.5)
+      // x < 140 三条带子间距不到 10px、几乎完全重合，位置信息本来就不够，只要求整体
+      inner.forEach((p, i) => {
+        if (p.x >= 140) expect(Math.abs(ds[i])).toBeLessThan(2)
+      })
+    }
+  })
+
+  it('空心圆串中间穿一条同色拟合线：仍取中线', () => {
+    const img = makeImg(260, 120)
+    markersAlong(img, sine, 20, 240, 6, hollowCircle)
+    paint(img, RED, curveShape(sine, 0.75))
+    const out = trace(img, strokeAlong(sine, 25, 235, 0, -3), 12, 3)
+    expect(out.points.length).toBeGreaterThan(50)
+    for (const p of out.points) expect(normalDist(sine, p)).toBeLessThan(1.5)
   })
 
   it('只涂到背景 / 笔迹太短：返回原因，不出点', () => {
